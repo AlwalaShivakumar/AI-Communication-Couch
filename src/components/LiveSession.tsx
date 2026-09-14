@@ -77,6 +77,8 @@ export function LiveSession() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   
   const [isRetryMode, setIsRetryMode] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isManualEditing, setIsManualEditing] = useState(false);
   const [previousAttempt, setPreviousAttempt] = useState<string>("");
 
   const startRecording = useCallback((streamToUse?: MediaStream) => {
@@ -259,11 +261,17 @@ export function LiveSession() {
       finalSegment = transcript.trim();
     }
 
-    if ((!finalSegment || finalSegment.length < 10) && audioChunksRef.current.length > 0) {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
       try {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-          try { mediaRecorderRef.current.requestData(); } catch (e) {}
+        if (typeof mediaRecorderRef.current.requestData === "function") {
+          mediaRecorderRef.current.requestData();
         }
+      } catch (e) {}
+    }
+
+    if ((!finalSegment || finalSegment.length < 10) && audioChunksRef.current.length > 0) {
+      setIsTranscribing(true);
+      try {
         const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';
         const blob = new Blob(audioChunksRef.current, { type: mime });
         if (blob.size > 200) {
@@ -273,11 +281,14 @@ export function LiveSession() {
             if (res.transcript && res.transcript.trim().length >= 2) {
               finalSegment = res.transcript.trim();
               setTranscript(finalSegment);
+              setTranscriptParagraphs(prev => [...prev, finalSegment]);
             }
           }
         }
       } catch (err) {
         console.error("Audio cloud transcription fallback error in LiveSession:", err);
+      } finally {
+        setIsTranscribing(false);
       }
     }
 
@@ -367,14 +378,8 @@ export function LiveSession() {
   const startRecognition = useCallback(() => {
     if (typeof window === "undefined") return;
 
-    if (isMobileDevice()) {
-      return;
-    }
-
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRec) {
-      console.error("Speech Recognition API is not supported in this browser.");
-      setBrowserSupported(false);
       return;
     }
 
@@ -385,100 +390,95 @@ export function LiveSession() {
         recognitionRef.current.onerror = null;
         recognitionRef.current.stop();
       } catch(e) {}
+      recognitionRef.current = null;
     }
 
-    const recognition = new SpeechRec();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = navigator.language || "en-US";
-
-    recognition.onstart = () => {
-      isRecognitionRunningRef.current = true;
-    };
-
-    recognition.onerror = (event: any) => {
-      console.warn("Speech recognition error:", event?.error);
-      if (event?.error === 'not-allowed') {
-        setPermissionError(true);
-      }
-    };
-
-    recognition.onresult = (event: any) => {
-      if (!latestState.current.isMicOn || latestState.current.isPaused) return;
-
-      let sessionFinal = "";
-      let sessionInterim = "";
-
-      for (let i = 0; i < event.results.length; ++i) {
-        const item = event.results[i];
-        if (item.isFinal) {
-          sessionFinal += item[0].transcript + " ";
-        } else {
-          sessionInterim += item[0].transcript;
-        }
-      }
-
-      const cleanSessionFinal = sessionFinal.trim();
-      const base = finalizedPrefixRef.current.trim();
-      const fullTranscript = base 
-        ? (cleanSessionFinal ? `${base} ${cleanSessionFinal}` : base)
-        : cleanSessionFinal;
-
-      // Any active interim speech immediately cancels pending silence timeouts
-      if (sessionInterim) {
-        if (segmentTimeoutRef.current) {
-          clearTimeout(segmentTimeoutRef.current);
-          segmentTimeoutRef.current = null;
-        }
-      }
-
-      if (cleanSessionFinal) {
-        setTranscript(fullTranscript);
-        segmentBufferRef.current = fullTranscript;
-        setHasUnanalyzedSpeech(true);
-
-        if (!isMobileDevice() && latestState.current.startRecording) {
-          latestState.current.startRecording();
-        }
-        
-        if (segmentTimeoutRef.current) {
-          clearTimeout(segmentTimeoutRef.current);
-          segmentTimeoutRef.current = null;
-        }
-        
-        let timeoutMs = 8000;
-        try {
-          const pacing = localStorage.getItem("pacing_profile");
-          if (pacing && pacing.includes("2.5s")) timeoutMs = 5000;
-          else if (pacing && pacing.includes("7s")) timeoutMs = 10000;
-        } catch(e) {}
-        
-        segmentTimeoutRef.current = setTimeout(() => {
-          if (isSpeakingRef.current) return;
-          const finalSegment = segmentBufferRef.current.trim();
-          if (finalSegment && finalSegment.length >= 10) {
-            latestState.current.triggerAnalysis(finalSegment);
-          }
-        }, timeoutMs);
-      }
-      setInterimTranscript(sessionInterim);
-    };
-
-    recognition.onend = () => {
-      isRecognitionRunningRef.current = false;
-      if (segmentBufferRef.current) {
-        finalizedPrefixRef.current = segmentBufferRef.current;
-      }
-      if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused) {
-        setTimeout(() => {
-          if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
-            startRecognition();
-          }
-        }, 200);
-      }
-    };
-
     try {
+      const isMobile = isMobileDevice();
+      const recognition = new SpeechRec();
+      // On mobile devices, continuous = true causes hardware aborts; use continuous = false
+      recognition.continuous = !isMobile;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || "en-US";
+
+      recognition.onstart = () => {
+        isRecognitionRunningRef.current = true;
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn("Speech recognition error:", event?.error);
+        if (event?.error === 'not-allowed') {
+          setPermissionError(true);
+        }
+      };
+
+      recognition.onresult = (event: any) => {
+        if (!latestState.current.isMicOn || latestState.current.isPaused) return;
+
+        let sessionFinal = "";
+        let sessionInterim = "";
+
+        for (let i = 0; i < event.results.length; ++i) {
+          const item = event.results[i];
+          if (item.isFinal) {
+            sessionFinal += item[0].transcript + " ";
+          } else {
+            sessionInterim += item[0].transcript;
+          }
+        }
+
+        const cleanSessionFinal = sessionFinal.trim();
+        const base = finalizedPrefixRef.current.trim();
+        const fullTranscript = base 
+          ? (cleanSessionFinal ? `${base} ${cleanSessionFinal}` : base)
+          : cleanSessionFinal;
+
+        if (cleanSessionFinal || sessionInterim) {
+          setTranscript(fullTranscript || sessionInterim);
+          segmentBufferRef.current = fullTranscript || sessionInterim;
+          setHasUnanalyzedSpeech(true);
+        }
+        setInterimTranscript(sessionInterim);
+
+        if (cleanSessionFinal && !isMobile) {
+          if (segmentTimeoutRef.current) {
+            clearTimeout(segmentTimeoutRef.current);
+            segmentTimeoutRef.current = null;
+          }
+          let timeoutMs = 8000;
+          try {
+            const pacing = localStorage.getItem("pacing_profile");
+            if (pacing && pacing.includes("2.5s")) timeoutMs = 5000;
+            else if (pacing && pacing.includes("7s")) timeoutMs = 10000;
+          } catch(e) {}
+          segmentTimeoutRef.current = setTimeout(() => {
+            if (isSpeakingRef.current) return;
+            const finalSegment = segmentBufferRef.current.trim();
+            if (finalSegment && finalSegment.length >= 10) {
+              latestState.current.triggerAnalysis(finalSegment);
+            }
+          }, timeoutMs);
+        }
+      };
+
+      recognition.onend = () => {
+        isRecognitionRunningRef.current = false;
+        if (segmentBufferRef.current) {
+          finalizedPrefixRef.current = segmentBufferRef.current;
+        }
+        // ONLY auto-restart on desktop Chrome where continuous loop doesn't fight mobile audio HAL
+        if (!isMobile) {
+          const { isSessionActive, isMicOn, isPaused } = latestState.current;
+          if (isSessionActive && isMicOn && !isPaused) {
+            setTimeout(() => {
+              if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
+                startRecognition();
+              }
+            }, 300);
+          }
+        }
+      };
+
       recognition.start();
       recognitionRef.current = recognition;
     } catch(e) {
@@ -856,29 +856,58 @@ export function LiveSession() {
             </div>
             
             {/* Live Transcript docked to bottom of AI panel */}
-            <div className="h-32 bg-gray-950 border-t border-gray-800 p-4 overflow-y-auto relative">
-               <div className="flex justify-between items-center mb-2">
-                 <span className="text-[10px] font-bold uppercase tracking-wider text-gray-600 flex items-center gap-2"><Mic size={12}/> Live Transcript</span>
-                 {isSessionActive && hasUnanalyzedSpeech && (appState === 'LISTENING' || appState === 'SPEAKING') && (
-                   <button 
-                     onClick={handleAnalyzeNow}
-                     className="flex items-center gap-1.5 px-3 py-1 bg-amber-500 hover:bg-amber-400 text-black text-xs font-bold rounded-full transition-transform hover:scale-105 shadow-md"
-                   >
-                     <Send size={12} />
-                     Analyze Now
-                   </button>
-                 )}
-               </div>
-               {transcriptParagraphs.map((p, i) => (
-                 <p key={i} className="text-gray-300 text-sm leading-relaxed mb-2">{p}</p>
-               ))}
-               {transcript || interimTranscript ? (
-                 <p className="text-gray-300 text-sm leading-relaxed">
-                   {transcript} <span className="text-gray-500 italic animate-pulse">{interimTranscript}</span>
-                 </p>
-               ) : transcriptParagraphs.length === 0 ? (
-                 <p className="text-gray-700 text-xs italic">{isSessionActive ? "Listening..." : "Start session to transcribe"}</p>
-               ) : null}
+            <div className="min-h-36 bg-gray-950 border-t border-gray-800 p-4 overflow-y-auto relative flex flex-col">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 flex items-center gap-2">
+                    <Mic size={12} className={audioLevel > 5 ? "text-green-500 animate-pulse" : "text-gray-500"} />
+                    Live Transcript
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      type="button"
+                      onClick={() => setIsManualEditing(!isManualEditing)}
+                      className="text-[11px] text-amber-500 hover:text-amber-400 font-semibold px-2 py-0.5 rounded hover:bg-amber-500/10 transition"
+                    >
+                      {isManualEditing ? "🎤 Voice View" : "✏️ Type / Edit"}
+                    </button>
+                    {isSessionActive && (
+                      <button 
+                        onClick={handleAnalyzeNow}
+                        disabled={appState === "ANALYZING" || isTranscribing}
+                        className="flex items-center gap-1.5 px-3 py-1 bg-amber-500 hover:bg-amber-400 text-black text-xs font-bold rounded-full transition-transform hover:scale-105 shadow-md disabled:opacity-50"
+                      >
+                        <Send size={12} />
+                        {isTranscribing ? "Transcribing..." : "Done Speaking — Analyze"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {isManualEditing ? (
+                  <textarea
+                    value={transcript}
+                    onChange={(e) => {
+                      setTranscript(e.target.value);
+                      segmentBufferRef.current = e.target.value;
+                    }}
+                    placeholder="Type or edit your answer here..."
+                    className="w-full flex-1 min-h-[80px] bg-transparent text-gray-200 text-sm outline-none resize-none placeholder-gray-600"
+                  />
+                ) : (
+                  <>
+                    {transcriptParagraphs.map((p, i) => (
+                      <p key={i} className="text-gray-300 text-sm leading-relaxed mb-2">{p}</p>
+                    ))}
+                    {transcript || interimTranscript ? (
+                      <p className="text-gray-300 text-sm leading-relaxed">
+                        {transcript} <span className="text-gray-500 italic animate-pulse">{interimTranscript}</span>
+                      </p>
+                    ) : (
+                      <p className="text-gray-600 text-xs italic my-auto">
+                        {isSessionActive ? "🎙️ Listening... Speak your answer aloud, then tap 'Done Speaking — Analyze'." : "Start training session to speak."}
+                      </p>
+                    )}
+                  </>
+                )}
             </div>
           </div>
         </div>

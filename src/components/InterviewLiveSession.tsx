@@ -416,12 +416,6 @@ export function InterviewLiveSession() {
   const startSpeechRecognition = useCallback(() => {
     if (typeof window === "undefined") return;
 
-    // On mobile devices, MediaRecorder has exclusive, stable mic access for AI transcription.
-    // Calling Web Speech API on mobile causes an infinite on/off restart loop and audio conflicts.
-    if (isMobileDevice()) {
-      return;
-    }
-
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRec) {
       setSpeechSupported(false);
@@ -439,8 +433,10 @@ export function InterviewLiveSession() {
     }
 
     try {
+      const isMobile = isMobileDevice();
       const recognition = new SpeechRec();
-      recognition.continuous = true;
+      // On mobile, continuous = false prevents mic drops and aborts
+      recognition.continuous = !isMobile;
       recognition.interimResults = true;
       recognition.lang = navigator.language || "en-US";
 
@@ -496,13 +492,16 @@ export function InterviewLiveSession() {
         if (segmentBufferRef.current) {
           finalizedPrefixRef.current = segmentBufferRef.current;
         }
-        const { isSessionActive, isMicOn, isPaused, appState } = latestState.current;
-        if (isSessionActive && isMicOn && !isPaused && appState !== "ANALYZING" && appState !== "FEEDBACK") {
-          setTimeout(() => {
-            if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
-              startSpeechRecognition();
-            }
-          }, 200);
+        // ONLY auto-restart on desktop Chrome; mobile should never loop restart to avoid mic on/off flickering
+        if (!isMobileDevice()) {
+          const { isSessionActive, isMicOn, isPaused, appState } = latestState.current;
+          if (isSessionActive && isMicOn && !isPaused && appState !== "ANALYZING" && appState !== "FEEDBACK") {
+            setTimeout(() => {
+              if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
+                startSpeechRecognition();
+              }
+            }, 300);
+          }
         }
       };
 
