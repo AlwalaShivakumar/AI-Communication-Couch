@@ -1,4 +1,4 @@
-# 🎙️ SpeakCraft — AI Communication & Mock Interview Coach
+# 🎙️ AI Communication Coach — Mock Interview & Speech Training Platform
 
 > An intelligent, speech-first AI coaching platform that elevates your communication and interview skills through real-time speech transcription, STAR method evaluation, and personalized performance insights.
 
@@ -12,9 +12,9 @@
 
 ## 🌟 Overview
 
-SpeakCraft is engineered to bridge the gap between preparing for conversations and executing them under pressure. Designed specifically for speech practice, it removes distracting video streams and focuses entirely on **verbal delivery, content structure, and pacing**.
+**AI Communication Coach** is engineered to bridge the gap between preparing for conversations and executing them under pressure. Designed specifically for speech practice, it removes distracting video streams and focuses entirely on **verbal delivery, content structure, and pacing**.
 
-Whether preparing for technical engineering interviews, executive presentations, or behavioral screening, SpeakCraft provides instantaneous, rubric-based feedback with audio playback so you can hear exactly how you sound to an interviewer.
+Whether preparing for technical engineering interviews, executive presentations, or behavioral screening, the platform provides instantaneous, rubric-based feedback with audio playback so you can hear exactly how you sound to an interviewer.
 
 ---
 
@@ -84,8 +84,8 @@ Whether preparing for technical engineering interviews, executive presentations,
 
 1. **Clone the Repository:**
    ```bash
-   git clone https://github.com/your-username/speakcraft-ai-coach.git
-   cd speakcraft-ai-coach
+   git clone https://github.com/AlwalaShivakumar/AI-Communication-Couch.git
+   cd AI-Communication-Couch
    ```
 
 2. **Install Dependencies:**
