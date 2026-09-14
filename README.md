@@ -105,8 +105,6 @@ Whether preparing for technical engineering interviews, executive presentations,
    NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
    ```
 
-> ⚠️ **CRITICAL SECURITY NOTE**: Never commit `.env` or `.env.local` to Git! These files contain sensitive credentials and are strictly excluded via `.gitignore`.
-
 ---
 
 ### Database Setup (Supabase)
