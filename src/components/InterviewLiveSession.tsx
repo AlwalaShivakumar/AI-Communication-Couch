@@ -52,6 +52,7 @@ export function InterviewLiveSession() {
   const recognitionRef = useRef<any>(null);
   const isRecognitionRunningRef = useRef<boolean>(false);
 
+  const finalizedPrefixRef = useRef<string>("");
   const segmentBufferRef = useRef<string>("");
   const segmentTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -85,7 +86,15 @@ export function InterviewLiveSession() {
 
   const setupAudioAnalysis = async (stream: MediaStream) => {
     try {
-      if (!audioContextRef.current) {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (analyserRef.current) {
+        try { analyserRef.current.disconnect(); } catch (e) {}
+        analyserRef.current = null;
+      }
+
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioCtx) {
           audioContextRef.current = new AudioCtx();
@@ -98,33 +107,32 @@ export function InterviewLiveSession() {
         await ctx.resume();
       }
 
-      if (!analyserRef.current) {
-        const source = ctx.createMediaStreamSource(stream);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-        analyserRef.current = analyser;
-      }
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.3;
+      source.connect(analyser);
+      analyserRef.current = analyser;
 
-      const analyser = analyserRef.current;
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
+      const dataArray = new Uint8Array(analyser.fftSize);
 
       const draw = () => {
-        if (!analyser || !latestState.current.isMicOn) {
+        if (!analyserRef.current || !latestState.current.isMicOn) {
           setAudioLevel(0);
           animationFrameRef.current = requestAnimationFrame(draw);
           return;
         }
 
-        analyser.getByteFrequencyData(dataArray);
+        analyserRef.current.getByteTimeDomainData(dataArray);
 
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          sum += dataArray[i];
+        let sumSquares = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const norm = (dataArray[i] - 128) / 128;
+          sumSquares += norm * norm;
         }
-        const average = sum / bufferLength;
-        const volumeLevel = Math.min(100, Math.max(0, (average / 128) * 100));
+        const rms = Math.sqrt(sumSquares / dataArray.length);
+        // Sensitive scale: silence < 3%, normal talk ~40-70%, loud talk 80-100%
+        const volumeLevel = Math.min(100, Math.round(rms * 320));
 
         setAudioLevel(volumeLevel);
 
@@ -427,32 +435,34 @@ export function InterviewLiveSession() {
         const { isMicOn, isPaused } = latestState.current;
         if (!isMicOn || isPaused) return;
 
-        let currentTranscript = "";
-        let currentInterim = "";
+        let sessionFinal = "";
+        let sessionInterim = "";
 
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            currentTranscript += event.results[i][0].transcript;
+        for (let i = 0; i < event.results.length; ++i) {
+          const item = event.results[i];
+          if (item.isFinal) {
+            sessionFinal += item[0].transcript + " ";
           } else {
-            currentInterim += event.results[i][0].transcript;
+            sessionInterim += item[0].transcript;
           }
         }
 
-        if (currentTranscript) {
-          setTranscript((prev) => (prev ? prev + " " + currentTranscript.trim() : currentTranscript.trim()));
-          segmentBufferRef.current = (segmentBufferRef.current + " " + currentTranscript.trim()).trim();
-        }
-        setInterimTranscript(currentInterim);
+        const cleanSessionFinal = sessionFinal.trim();
+        const base = finalizedPrefixRef.current.trim();
+        const fullTranscript = base 
+          ? (cleanSessionFinal ? `${base} ${cleanSessionFinal}` : base)
+          : cleanSessionFinal;
 
-        // Visual activity pulse on mobile devices
-        if (currentInterim || currentTranscript) {
+        setTranscript(fullTranscript);
+        segmentBufferRef.current = fullTranscript;
+        setInterimTranscript(sessionInterim);
+
+        if (sessionInterim || cleanSessionFinal) {
           setAppState("SPEAKING");
-          setAudioLevel(60);
           if (speakingCheckRef.current) clearTimeout(speakingCheckRef.current);
           speakingCheckRef.current = setTimeout(() => {
-            setAudioLevel(0);
             setAppState(prev => prev === "SPEAKING" ? "LISTENING" : prev);
-          }, 1200);
+          }, 1500);
         }
       };
 
@@ -469,14 +479,17 @@ export function InterviewLiveSession() {
 
       recognition.onend = () => {
         isRecognitionRunningRef.current = false;
+        // Lock in transcript from this cycle so it is preserved across auto-restarts without duplicating
+        if (segmentBufferRef.current) {
+          finalizedPrefixRef.current = segmentBufferRef.current;
+        }
         const { isSessionActive, isMicOn, isPaused, appState } = latestState.current;
-        // Auto-restart on mobile pauses to keep listening
         if (isSessionActive && isMicOn && !isPaused && appState !== "ANALYZING" && appState !== "FEEDBACK") {
           setTimeout(() => {
             if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
               startSpeechRecognition();
             }
-          }, 150);
+          }, 200);
         }
       };
 
@@ -569,6 +582,7 @@ export function InterviewLiveSession() {
       setSpeakingTimeMs(0);
       setAccumulatedFeedbacks([]);
       setAppState("LISTENING");
+      finalizedPrefixRef.current = "";
       segmentBufferRef.current = "";
       setTranscriptParagraphs([]);
       setTranscript("");
@@ -597,6 +611,7 @@ export function InterviewLiveSession() {
   const handleRetryQuestion = () => {
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     stopRecording();
+    finalizedPrefixRef.current = "";
     setTranscriptParagraphs([]);
     setTranscript("");
     setInterimTranscript("");
@@ -895,16 +910,22 @@ export function InterviewLiveSession() {
 
                         {/* Live Voice Input Level Meter */}
                         {isSessionActive && (
-                          <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 px-2.5 py-1 rounded-full border border-gray-200 dark:border-gray-700 ml-1">
-                            <div className="w-2 h-2 rounded-full transition-colors duration-150" style={{ backgroundColor: audioLevel > 5 ? '#22c55e' : '#9ca3af' }} />
-                            <span className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">Mic:</span>
-                            <div className="w-14 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                          <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 px-3 py-1.5 rounded-full border border-gray-200 dark:border-gray-700 ml-1">
+                            <Mic size={14} className={audioLevel > 5 ? "text-green-500 animate-pulse" : "text-gray-400"} />
+                            <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">Voice:</span>
+                            <div className="w-16 sm:w-20 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
                               <div 
-                                className="h-full bg-blue-500 transition-all duration-75"
+                                className={`h-full transition-all duration-75 ${
+                                  audioLevel > 60 
+                                    ? "bg-gradient-to-r from-green-500 to-amber-500" 
+                                    : "bg-green-500"
+                                }`}
                                 style={{ width: `${isMicOn ? Math.min(100, Math.max(audioLevel, 0)) : 0}%` }}
                               />
                             </div>
-                            <span className="text-[10px] font-mono text-gray-500 dark:text-gray-400">{Math.round(isMicOn ? audioLevel : 0)}%</span>
+                            <span className="text-xs font-mono font-bold text-gray-700 dark:text-gray-200 min-w-[28px]">
+                              {Math.round(isMicOn ? audioLevel : 0)}%
+                            </span>
                           </div>
                         )}
 

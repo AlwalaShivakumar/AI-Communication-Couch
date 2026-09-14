@@ -56,6 +56,7 @@ export function LiveSession() {
   const recognitionRef = useRef<any>(null);
   const isRecognitionRunningRef = useRef<boolean>(false);
   
+  const finalizedPrefixRef = useRef<string>("");
   const segmentBufferRef = useRef<string>("");
   const segmentTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
@@ -119,48 +120,47 @@ export function LiveSession() {
   const lastSpeakTimeRef = useRef<number>(0);
 
   const setupAudioAnalysis = async (stream: MediaStream) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    if (analyserRef.current) {
+      try { analyserRef.current.disconnect(); } catch(e) {}
+      analyserRef.current = null;
+    }
+
+    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) audioContextRef.current = new AudioCtx();
     }
     const ctx = audioContextRef.current;
     if (ctx && ctx.state === "suspended") {
       await ctx.resume();
     }
+    if (!ctx) return;
     
-    if (!analyserRef.current) {
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-    }
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.3;
+    source.connect(analyser);
+    analyserRef.current = analyser;
 
-    const analyser = analyserRef.current;
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
+    const dataArray = new Uint8Array(analyser.fftSize);
 
     const draw = () => {
-      if (!analyser || !isMicOn) {
+      if (!analyserRef.current || !latestState.current.isMicOn) {
         setAudioLevel(0);
-
-        if (isSpeakingRef.current) {
-          const now = Date.now();
-          setSpeakingTimeMs(prev => prev + (now - lastSpeakTimeRef.current));
-          isSpeakingRef.current = false;
-        }
-
         animationFrameRef.current = requestAnimationFrame(draw);
         return;
       }
 
-      analyser.getByteFrequencyData(dataArray);
+      analyserRef.current.getByteTimeDomainData(dataArray);
       
-      let sum = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        sum += dataArray[i];
+      let sumSquares = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        const norm = (dataArray[i] - 128) / 128;
+        sumSquares += norm * norm;
       }
-      const average = sum / bufferLength;
-      const volumeLevel = Math.min(100, Math.max(0, (average / 128) * 100));
+      const rms = Math.sqrt(sumSquares / dataArray.length);
+      const volumeLevel = Math.min(100, Math.round(rms * 320));
       
       setAudioLevel(volumeLevel);
 
@@ -388,28 +388,35 @@ export function LiveSession() {
     recognition.onresult = (event: any) => {
       if (!latestState.current.isMicOn || latestState.current.isPaused) return;
 
-      let currentTranscript = "";
-      let currentInterim = "";
+      let sessionFinal = "";
+      let sessionInterim = "";
 
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          currentTranscript += event.results[i][0].transcript;
+      for (let i = 0; i < event.results.length; ++i) {
+        const item = event.results[i];
+        if (item.isFinal) {
+          sessionFinal += item[0].transcript + " ";
         } else {
-          currentInterim += event.results[i][0].transcript;
+          sessionInterim += item[0].transcript;
         }
       }
 
+      const cleanSessionFinal = sessionFinal.trim();
+      const base = finalizedPrefixRef.current.trim();
+      const fullTranscript = base 
+        ? (cleanSessionFinal ? `${base} ${cleanSessionFinal}` : base)
+        : cleanSessionFinal;
+
       // Any active interim speech immediately cancels pending silence timeouts
-      if (currentInterim) {
+      if (sessionInterim) {
         if (segmentTimeoutRef.current) {
           clearTimeout(segmentTimeoutRef.current);
           segmentTimeoutRef.current = null;
         }
       }
 
-      if (currentTranscript) {
-        setTranscript((prev) => (prev ? prev + " " + currentTranscript.trim() : currentTranscript.trim()));
-        segmentBufferRef.current = (segmentBufferRef.current + " " + currentTranscript.trim()).trim();
+      if (cleanSessionFinal) {
+        setTranscript(fullTranscript);
+        segmentBufferRef.current = fullTranscript;
         setHasUnanalyzedSpeech(true);
 
         if (!isMobileDevice() && latestState.current.startRecording) {
@@ -436,17 +443,20 @@ export function LiveSession() {
           }
         }, timeoutMs);
       }
-      setInterimTranscript(currentInterim);
+      setInterimTranscript(sessionInterim);
     };
 
     recognition.onend = () => {
       isRecognitionRunningRef.current = false;
+      if (segmentBufferRef.current) {
+        finalizedPrefixRef.current = segmentBufferRef.current;
+      }
       if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused) {
         setTimeout(() => {
           if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
             startRecognition();
           }
-        }, 150);
+        }, 200);
       }
     };
 
@@ -484,6 +494,7 @@ export function LiveSession() {
   }, [isMicOn, isSessionActive, isPaused, startRecognition, stopRecognition]);
 
   const resetSessionState = () => {
+    finalizedPrefixRef.current = "";
     setTranscriptParagraphs([]);
     setTranscript("");
     setInterimTranscript("");
