@@ -18,6 +18,19 @@ declare global {
 
 type SessionState = "IDLE" | "LISTENING" | "SPEAKING" | "ANALYZING" | "COACHING";
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl ? dataUrl.split(",")[1] || "" : "";
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 export function LiveSession() {
   
   const searchParams = useSearchParams();
@@ -253,13 +266,14 @@ export function LiveSession() {
         }
         const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';
         const blob = new Blob(audioChunksRef.current, { type: mime });
-        if (blob.size > 500) {
-          const arrayBuffer = await blob.arrayBuffer();
-          const base64 = Buffer.from(arrayBuffer).toString('base64');
-          const res = await transcribeAudio(base64, mime);
-          if (res.transcript && res.transcript.trim().length >= 5) {
-            finalSegment = res.transcript.trim();
-            setTranscript(finalSegment);
+        if (blob.size > 200) {
+          const base64 = await blobToBase64(blob);
+          if (base64) {
+            const res = await transcribeAudio(base64, mime);
+            if (res.transcript && res.transcript.trim().length >= 2) {
+              finalSegment = res.transcript.trim();
+              setTranscript(finalSegment);
+            }
           }
         }
       } catch (err) {
@@ -352,6 +366,10 @@ export function LiveSession() {
 
   const startRecognition = useCallback(() => {
     if (typeof window === "undefined") return;
+
+    if (isMobileDevice()) {
+      return;
+    }
 
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRec) {

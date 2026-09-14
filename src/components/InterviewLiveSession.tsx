@@ -17,6 +17,20 @@ declare global {
 
 type SessionState = "IDLE" | "ASKING" | "LISTENING" | "SPEAKING" | "ANALYZING" | "FEEDBACK";
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl ? dataUrl.split(",")[1] || "" : "";
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+
 export function InterviewLiveSession() {
     
   const [questions, setQuestions] = useState<string[]>([]);
@@ -213,14 +227,6 @@ export function InterviewLiveSession() {
 
   const currentQuestion = followUpQuestion || questions[currentQuestionIndex] || "";
 
-  useEffect(() => {
-    if (isSessionActive && currentQuestion && 'speechSynthesis' in window && !isTTSMuted) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(currentQuestion);
-      window.speechSynthesis.speak(utterance);
-    }
-  }, [currentQuestion, isSessionActive, isTTSMuted]);
-
   const replayQuestion = () => {
     if ('speechSynthesis' in window && currentQuestion && !isTTSMuted) {
       window.speechSynthesis.cancel();
@@ -374,14 +380,15 @@ export function InterviewLiveSession() {
       try {
         const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';
         const blob = new Blob(audioChunksRef.current, { type: mime });
-        if (blob.size > 500) {
-          const arrayBuffer = await blob.arrayBuffer();
-          const base64 = Buffer.from(arrayBuffer).toString('base64');
-          const res = await transcribeAudio(base64, mime);
-          if (res.transcript && res.transcript.trim().length >= 5) {
-            textToAnalyze = res.transcript.trim();
-            setTranscript(textToAnalyze);
-            setTranscriptParagraphs(prev => [...prev, textToAnalyze]);
+        if (blob.size > 200) {
+          const base64 = await blobToBase64(blob);
+          if (base64) {
+            const res = await transcribeAudio(base64, mime);
+            if (res.transcript && res.transcript.trim().length >= 2) {
+              textToAnalyze = res.transcript.trim();
+              setTranscript(textToAnalyze);
+              setTranscriptParagraphs(prev => [...prev, textToAnalyze]);
+            }
           }
         }
       } catch (err) {
@@ -408,6 +415,12 @@ export function InterviewLiveSession() {
 
   const startSpeechRecognition = useCallback(() => {
     if (typeof window === "undefined") return;
+
+    // On mobile devices, MediaRecorder has exclusive, stable mic access for AI transcription.
+    // Calling Web Speech API on mobile causes an infinite on/off restart loop and audio conflicts.
+    if (isMobileDevice()) {
+      return;
+    }
 
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRec) {
@@ -521,6 +534,28 @@ export function InterviewLiveSession() {
       if (speakingCheckRef.current) clearTimeout(speakingCheckRef.current);
     };
   }, [stopSpeechRecognition]);
+
+  useEffect(() => {
+    if (isSessionActive && currentQuestion && 'speechSynthesis' in window && !isTTSMuted) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(currentQuestion);
+      setAppState("ASKING");
+      stopSpeechRecognition();
+      utterance.onend = () => {
+        setAppState("LISTENING");
+        if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused) {
+          startSpeechRecognition();
+        }
+      };
+      utterance.onerror = () => {
+        setAppState("LISTENING");
+        if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused) {
+          startSpeechRecognition();
+        }
+      };
+      window.speechSynthesis.speak(utterance);
+    }
+  }, [currentQuestion, isSessionActive, isTTSMuted, stopSpeechRecognition, startSpeechRecognition]);
 
   const saveSessionToDb = async () => {
     if (!sessionStartTime) return;
@@ -960,9 +995,23 @@ export function InterviewLiveSession() {
                                 <span className="text-blue-500 dark:text-blue-400 italic"> {interimTranscript}</span>
                             </p>
                             ) : transcriptParagraphs.length === 0 ? (
-                            <div className="h-full flex flex-col items-center justify-center text-gray-400 italic text-sm gap-2 my-auto py-8">
-                                <Mic size={24} className="text-blue-500/50 animate-bounce" />
-                                <span>{appState === "LISTENING" ? "Listening... Speak your answer aloud or click 'Type / Edit'." : "Ready to speak."}</span>
+                            <div className="h-full flex flex-col items-center justify-center text-gray-400 italic text-sm gap-3 my-auto py-8 text-center px-4">
+                                {isSessionActive ? (
+                                  <>
+                                    <div className="flex items-center gap-2 text-red-500 font-semibold text-xs bg-red-500/10 px-3 py-1.5 rounded-full border border-red-500/20">
+                                      <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping inline-block" />
+                                      <span>Recording your voice... Speak your answer.</span>
+                                    </div>
+                                    <span className="text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+                                      Watch the voice meter above as you speak, then tap &ldquo;Done Speaking &mdash; Analyze My Answer&rdquo; below.
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Mic size={24} className="text-blue-500/50 animate-bounce" />
+                                    <span>Tap &ldquo;Start Interview&rdquo; above to begin speaking.</span>
+                                  </>
+                                )}
                             </div>
                             ) : null}
                           </>

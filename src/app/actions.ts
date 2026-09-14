@@ -393,5 +393,11 @@ export async function generateSessionDimensions(feedbacks: any[]) {
   }
 }
 
-export { transcribeAudio } from "./interview/actions";
+export async function transcribeAudio(
+  base64Audio: string,
+  mimeType: string = "audio/webm"
+): Promise<{ transcript?: string; serverError?: string }> {
+  const { transcribeAudio: transcribe } = await import("./interview/actions");
+  return transcribe(base64Audio, mimeType);
+}
 
