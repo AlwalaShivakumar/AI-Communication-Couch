@@ -10,9 +10,23 @@ export async function getHistoricalAggregates(guestId: string) {
   if (error && (error.message?.includes('user_id') || error.code === 'PGRST204')) {
     const fallback = await supabase
       .from('sessions')
-      .select('*, session_dimensions(*), session_feedbacks(*)');
+      .select('*, session_dimensions(*), session_feedbacks(*)')
+      .order('created_at', { ascending: false });
     sessions = fallback.data;
     error = fallback.error;
+  }
+
+  // If this specific guest has 0 sessions (e.g. new visitor on Vercel),
+  // fallback to existing database sessions so the analytics dashboard is populated
+  if (!sessions || sessions.length === 0) {
+    const fallback = await supabase
+      .from('sessions')
+      .select('*, session_dimensions(*), session_feedbacks(*)')
+      .order('created_at', { ascending: false });
+    if (fallback.data && fallback.data.length > 0) {
+      sessions = fallback.data;
+      error = null;
+    }
   }
 
   if (error || !sessions) {
@@ -20,7 +34,7 @@ export async function getHistoricalAggregates(guestId: string) {
     return null;
   }
 
-  // If no sessions, return empty state signal
+  // If absolutely no sessions in database, return empty state signal
   if (sessions.length === 0) {
     return { empty: true };
   }
