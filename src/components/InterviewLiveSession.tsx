@@ -6,6 +6,7 @@ import { supabase } from "@/lib/supabase";
 import { getGuestId } from "@/lib/auth";
 import { evaluateInterviewAnswer, InterviewEvaluation } from "@/app/interview/actions";
 import Link from "next/link";
+import { isMobileDevice } from "@/lib/utils";
 
 declare global {
   interface Window {
@@ -156,6 +157,11 @@ export function InterviewLiveSession() {
   };
 
   const startMedia = async () => {
+    // On mobile browsers (Android Chrome & iOS Safari), MediaRecorder/getUserMedia locks the OS microphone,
+    // which starves and completely breaks Web Speech API transcription.
+    if (isMobileDevice()) {
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
       mediaStreamRef.current = stream;
@@ -188,6 +194,11 @@ export function InterviewLiveSession() {
     setIsMicOn(newState);
     const stream = mediaStreamRef.current || mediaStream;
     if (stream) stream.getAudioTracks().forEach(t => t.enabled = newState);
+    if (!newState) {
+      stopSpeechRecognition();
+    } else if (isSessionActive && !isPaused) {
+      startSpeechRecognition();
+    }
   };
 
   const currentQuestion = followUpQuestion || questions[currentQuestionIndex] || "";
@@ -353,85 +364,116 @@ export function InterviewLiveSession() {
 
   const speakingCheckRef = useRef<NodeJS.Timeout | null>(null);
 
-  const initSpeechRecognition = useCallback(() => {
+  const startSpeechRecognition = useCallback(() => {
     if (typeof window === "undefined") return;
 
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRec) return;
+    if (!SpeechRec) {
+      setSpeechSupported(false);
+      return;
+    }
 
-    const recognition = new SpeechRec();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "en-US";
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.stop();
+      } catch (e) {}
+      recognitionRef.current = null;
+    }
 
-    recognition.onresult = (event: any) => {
-      const { isMicOn, isPaused } = latestState.current;
-      if (!isMicOn || isPaused) return;
+    try {
+      const recognition = new SpeechRec();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || "en-US";
 
-      let currentTranscript = "";
-      let currentInterim = "";
+      recognition.onresult = (event: any) => {
+        const { isMicOn, isPaused } = latestState.current;
+        if (!isMicOn || isPaused) return;
 
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          currentTranscript += event.results[i][0].transcript;
-        } else {
-          currentInterim += event.results[i][0].transcript;
-        }
-      }
+        let currentTranscript = "";
+        let currentInterim = "";
 
-      if (currentTranscript) {
-        setTranscript((prev) => (prev ? prev + " " + currentTranscript.trim() : currentTranscript.trim()));
-        segmentBufferRef.current = (segmentBufferRef.current + " " + currentTranscript.trim()).trim();
-      }
-      setInterimTranscript(currentInterim);
-    };
-
-    recognition.onstart = () => {
-      isRecognitionRunningRef.current = true;
-    };
-
-    recognition.onerror = (e: any) => {
-      console.warn("Interview speech recognition error:", e?.error);
-    };
-
-    recognition.onend = () => {
-      isRecognitionRunningRef.current = false;
-      const { isSessionActive, isMicOn, isPaused } = latestState.current;
-      if (isSessionActive && isMicOn && !isPaused) {
-        setTimeout(() => {
-          if (!isRecognitionRunningRef.current && recognitionRef.current) {
-            try { recognitionRef.current.start(); } catch (e) {}
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            currentTranscript += event.results[i][0].transcript;
+          } else {
+            currentInterim += event.results[i][0].transcript;
           }
-        }, 150); 
-      }
-    };
+        }
 
-    recognitionRef.current = recognition;
+        if (currentTranscript) {
+          setTranscript((prev) => (prev ? prev + " " + currentTranscript.trim() : currentTranscript.trim()));
+          segmentBufferRef.current = (segmentBufferRef.current + " " + currentTranscript.trim()).trim();
+        }
+        setInterimTranscript(currentInterim);
+
+        // Visual activity pulse on mobile devices
+        if (currentInterim || currentTranscript) {
+          setAppState("SPEAKING");
+          setAudioLevel(60);
+          if (speakingCheckRef.current) clearTimeout(speakingCheckRef.current);
+          speakingCheckRef.current = setTimeout(() => {
+            setAudioLevel(0);
+            setAppState(prev => prev === "SPEAKING" ? "LISTENING" : prev);
+          }, 1200);
+        }
+      };
+
+      recognition.onstart = () => {
+        isRecognitionRunningRef.current = true;
+      };
+
+      recognition.onerror = (e: any) => {
+        console.warn("Interview speech recognition error:", e?.error);
+        if (e?.error === 'not-allowed') {
+          setMediaError("Microphone access was denied. Please allow microphone permissions in your mobile browser settings.");
+        }
+      };
+
+      recognition.onend = () => {
+        isRecognitionRunningRef.current = false;
+        const { isSessionActive, isMicOn, isPaused, appState } = latestState.current;
+        // Auto-restart on mobile pauses to keep listening
+        if (isSessionActive && isMicOn && !isPaused && appState !== "ANALYZING" && appState !== "FEEDBACK") {
+          setTimeout(() => {
+            if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
+              startSpeechRecognition();
+            }
+          }, 150);
+        }
+      };
+
+      recognition.start();
+      recognitionRef.current = recognition;
+    } catch (e) {
+      console.warn("Speech recognition failed to start:", e);
+    }
+  }, []);
+
+  const stopSpeechRecognition = useCallback(() => {
+    isRecognitionRunningRef.current = false;
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.stop();
+      } catch (e) {}
+      recognitionRef.current = null;
+    }
+    setInterimTranscript("");
   }, []);
 
   useEffect(() => {
-    if (!recognitionRef.current) {
-      initSpeechRecognition();
-    }
     return () => {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch(e) {}
-        recognitionRef.current = null;
-      }
+      stopSpeechRecognition();
       if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
       if (speakingCheckRef.current) clearTimeout(speakingCheckRef.current);
     };
-  }, [initSpeechRecognition]);
-
-  useEffect(() => {
-    if (recognitionRef.current) {
-      if (isSessionActive && isMicOn) {
-        try { recognitionRef.current.start(); } catch(e) {}
-      } else {
-        try { recognitionRef.current.stop(); } catch(e) {}
-      }
-    }
-  }, [isMicOn, isSessionActive]);
+  }, [stopSpeechRecognition]);
 
   const saveSessionToDb = async () => {
     if (!sessionStartTime) return;
@@ -487,7 +529,15 @@ export function InterviewLiveSession() {
 
   const toggleSession = async () => {
     if (!isSessionActive) {
-      await startMedia();
+      const isMobile = isMobileDevice();
+
+      // Directly invoke speech recognition on user touch/click gesture
+      startSpeechRecognition();
+
+      if (!isMobile) {
+        await startMedia();
+      }
+
       setIsSessionActive(true);
       setIsInterviewComplete(false);
       setSessionStartTime(Date.now());
@@ -503,7 +553,7 @@ export function InterviewLiveSession() {
     } else {
       saveSessionToDb();
       stopMedia();
-      if (recognitionRef.current) recognitionRef.current.stop();
+      stopSpeechRecognition();
       if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       
@@ -523,8 +573,9 @@ export function InterviewLiveSession() {
     setFeedback(null);
     setAudioUrl(null);
     setAppState("LISTENING");
+    startSpeechRecognition();
     const stream = mediaStreamRef.current || mediaStream;
-    if (stream) {
+    if (stream && !isMobileDevice()) {
       setTimeout(() => {
         startRecording(stream);
       }, 100);
@@ -546,8 +597,9 @@ export function InterviewLiveSession() {
     setFeedback(null);
     setAudioUrl(null);
     setAppState("LISTENING");
+    startSpeechRecognition();
     const stream = mediaStreamRef.current || mediaStream;
-    if (stream) {
+    if (stream && !isMobileDevice()) {
       setTimeout(() => {
         startRecording(stream);
       }, 100);
@@ -570,7 +622,7 @@ export function InterviewLiveSession() {
          setIsInterviewComplete(true);
          saveSessionToDb();
          stopMedia();
-         if (recognitionRef.current) recognitionRef.current.stop();
+         stopSpeechRecognition();
          if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
          setIsSessionActive(false);
          setAppState("IDLE");
@@ -585,8 +637,9 @@ export function InterviewLiveSession() {
     segmentBufferRef.current = "";
     setFeedback(null);
     setAppState("LISTENING");
+    startSpeechRecognition();
     const stream = mediaStreamRef.current || mediaStream;
-    if (stream) {
+    if (stream && !isMobileDevice()) {
       setTimeout(() => {
         startRecording(stream);
       }, 100);
@@ -602,15 +655,13 @@ export function InterviewLiveSession() {
       const newState = !prev;
       if (newState) {
         if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
-        if (recognitionRef.current) {
-          try { recognitionRef.current.stop(); } catch(e) {}
-        }
+        stopSpeechRecognition();
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
           try { mediaRecorderRef.current.pause(); } catch(e) {}
         }
       } else {
-        if (recognitionRef.current && isSessionActive && isMicOn) {
-          try { recognitionRef.current.start(); } catch(e) {}
+        if (isSessionActive && isMicOn) {
+          startSpeechRecognition();
         }
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === "paused") {
           try { mediaRecorderRef.current.resume(); } catch(e) {}

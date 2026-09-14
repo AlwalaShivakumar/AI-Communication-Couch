@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Mic, MicOff, Play, Square, RefreshCw, AlertCircle, Activity, BrainCircuit, AlertTriangle, Send, CheckCircle, Pause } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, isMobileDevice } from "@/lib/utils";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { getGuestId } from "@/lib/auth";
@@ -193,6 +193,9 @@ export function LiveSession() {
   };
 
   const startMedia = async () => {
+    if (isMobileDevice()) {
+      return;
+    }
     try {
       setPermissionError(false);
       const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
@@ -383,7 +386,7 @@ export function LiveSession() {
         segmentBufferRef.current = (segmentBufferRef.current + " " + currentTranscript.trim()).trim();
         setHasUnanalyzedSpeech(true);
 
-        if (latestState.current.startRecording) {
+        if (!isMobileDevice() && latestState.current.startRecording) {
           latestState.current.startRecording();
         }
         
@@ -414,7 +417,9 @@ export function LiveSession() {
       isRecognitionRunningRef.current = false;
       if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused) {
         setTimeout(() => {
-          startRecognition();
+          if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
+            startRecognition();
+          }
         }, 150);
       }
     };
@@ -477,8 +482,11 @@ export function LiveSession() {
 
   const toggleSession = async () => {
     if (!isSessionActive) {
-      await startMedia();
-      startRecording();
+      startRecognition();
+      if (!isMobileDevice()) {
+        await startMedia();
+        startRecording();
+      }
       setIsSessionActive(true);
       setSessionStartTime(Date.now());
       setSpeakingTimeMs(0);
