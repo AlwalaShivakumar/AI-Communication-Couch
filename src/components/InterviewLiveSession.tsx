@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Mic, MicOff, Play, Square, RefreshCw, AlertCircle, Briefcase, Activity, BrainCircuit, ChevronRight, SkipForward, Volume2, VolumeX, Pause, CheckCircle, ChevronLeft, RotateCcw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { getGuestId } from "@/lib/auth";
-import { evaluateInterviewAnswer, InterviewEvaluation } from "@/app/interview/actions";
+import { evaluateInterviewAnswer, InterviewEvaluation, transcribeAudio } from "@/app/interview/actions";
 import Link from "next/link";
 import { isMobileDevice } from "@/lib/utils";
 
@@ -32,6 +32,8 @@ export function InterviewLiveSession() {
   
   const [isTTSMuted, setIsTTSMuted] = useState(false);
   const [shortResponseError, setShortResponseError] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isManualEditing, setIsManualEditing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -81,72 +83,77 @@ export function InterviewLiveSession() {
     }
   }, []);
 
-  const setupAudioAnalysis = (stream: MediaStream) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    const ctx = audioContextRef.current;
-
-    if (!analyserRef.current) {
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-    }
-
-    const analyser = analyserRef.current;
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-
-    const draw = () => {
-      if (!analyser || !isMicOn) {
-        setAudioLevel(0);
-
-        if (isSpeakingRef.current) {
-          const now = Date.now();
-          setSpeakingTimeMs(prev => prev + (now - lastSpeakTimeRef.current));
-          isSpeakingRef.current = false;
+  const setupAudioAnalysis = async (stream: MediaStream) => {
+    try {
+      if (!audioContextRef.current) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          audioContextRef.current = new AudioCtx();
         }
+      }
+      const ctx = audioContextRef.current;
+      if (!ctx) return;
+
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+
+      if (!analyserRef.current) {
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyserRef.current = analyser;
+      }
+
+      const analyser = analyserRef.current;
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const draw = () => {
+        if (!analyser || !latestState.current.isMicOn) {
+          setAudioLevel(0);
+          animationFrameRef.current = requestAnimationFrame(draw);
+          return;
+        }
+
+        analyser.getByteFrequencyData(dataArray);
+
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+        const volumeLevel = Math.min(100, Math.max(0, (average / 128) * 100));
+
+        setAudioLevel(volumeLevel);
+
+        const now = Date.now();
+        if (volumeLevel > 8) {
+          if (!isSpeakingRef.current) {
+            isSpeakingRef.current = true;
+            lastSpeakTimeRef.current = now;
+          }
+        } else {
+          if (isSpeakingRef.current) {
+            setSpeakingTimeMs(prev => prev + (now - lastSpeakTimeRef.current));
+            isSpeakingRef.current = false;
+          }
+        }
+
+        setAppState(prev => {
+          if (prev === "LISTENING" && volumeLevel > 8) return "SPEAKING";
+          if (prev === "SPEAKING" && volumeLevel < 4 && !interimTranscript) return "LISTENING";
+          return prev;
+        });
 
         animationFrameRef.current = requestAnimationFrame(draw);
-        return;
-      }
+      };
 
-      analyser.getByteFrequencyData(dataArray);
-
-      let sum = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        sum += dataArray[i];
-      }
-      const average = sum / bufferLength;
-      const volumeLevel = Math.min(100, Math.max(0, (average / 128) * 100));
-
-      setAudioLevel(volumeLevel);
-
-      const now = Date.now();
-      if (volumeLevel > 10) {
-        if (!isSpeakingRef.current) {
-          isSpeakingRef.current = true;
-          lastSpeakTimeRef.current = now;
-        }
-      } else {
-        if (isSpeakingRef.current) {
-          setSpeakingTimeMs(prev => prev + (now - lastSpeakTimeRef.current));
-          isSpeakingRef.current = false;
-        }
-      }
-
-      setAppState(prev => {
-        if (prev === "LISTENING" && volumeLevel > 10) return "SPEAKING";
-        if (prev === "SPEAKING" && volumeLevel < 5 && !interimTranscript) return "LISTENING";
-        return prev;
-      });
-
-      animationFrameRef.current = requestAnimationFrame(draw);
-    };
-
-    draw();
+      draw();
+    } catch (e) {
+      console.warn("setupAudioAnalysis error:", e);
+    }
   };
 
   const cleanupAudioAnalysis = () => {
@@ -157,11 +164,6 @@ export function InterviewLiveSession() {
   };
 
   const startMedia = async () => {
-    // On mobile browsers (Android Chrome & iOS Safari), MediaRecorder/getUserMedia locks the OS microphone,
-    // which starves and completely breaks Web Speech API transcription.
-    if (isMobileDevice()) {
-      return;
-    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
       mediaStreamRef.current = stream;
@@ -170,11 +172,11 @@ export function InterviewLiveSession() {
 
       stream.getAudioTracks().forEach(t => t.enabled = isMicOn);
 
-      setupAudioAnalysis(stream);
+      await setupAudioAnalysis(stream);
       startRecording(stream);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error accessing media devices.", err);
-      setMediaError("Could not access microphone. Please check your browser permissions and try again.");
+      setMediaError("Could not access microphone. Please check your browser permissions and allow microphone access.");
     }
   };
 
@@ -335,7 +337,7 @@ export function InterviewLiveSession() {
     }
   };
 
-  const handleManualAnalyze = () => {
+  const handleManualAnalyze = async () => {
     if (segmentTimeoutRef.current) {
       clearTimeout(segmentTimeoutRef.current);
       segmentTimeoutRef.current = null;
@@ -347,6 +349,38 @@ export function InterviewLiveSession() {
     }
     if (interimTranscript.trim()) {
       textToAnalyze = (textToAnalyze + " " + interimTranscript.trim()).trim();
+    }
+
+    // Flush recorder to finalize latest audio
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      try {
+        if (typeof mediaRecorderRef.current.requestData === "function") {
+          mediaRecorderRef.current.requestData();
+        }
+      } catch (e) {}
+    }
+
+    // Fallback: If Web Speech API captured nothing or <10 chars, transcribe voice audio via Gemini!
+    if (textToAnalyze.length < 10 && audioChunksRef.current.length > 0) {
+      setIsTranscribing(true);
+      try {
+        const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';
+        const blob = new Blob(audioChunksRef.current, { type: mime });
+        if (blob.size > 500) {
+          const arrayBuffer = await blob.arrayBuffer();
+          const base64 = Buffer.from(arrayBuffer).toString('base64');
+          const res = await transcribeAudio(base64, mime);
+          if (res.transcript && res.transcript.trim().length >= 5) {
+            textToAnalyze = res.transcript.trim();
+            setTranscript(textToAnalyze);
+            setTranscriptParagraphs(prev => [...prev, textToAnalyze]);
+          }
+        }
+      } catch (err) {
+        console.error("Audio cloud transcription fallback error:", err);
+      } finally {
+        setIsTranscribing(false);
+      }
     }
 
     if (textToAnalyze.length >= 10) {
@@ -529,15 +563,6 @@ export function InterviewLiveSession() {
 
   const toggleSession = async () => {
     if (!isSessionActive) {
-      const isMobile = isMobileDevice();
-
-      // Directly invoke speech recognition on user touch/click gesture
-      startSpeechRecognition();
-
-      if (!isMobile) {
-        await startMedia();
-      }
-
       setIsSessionActive(true);
       setIsInterviewComplete(false);
       setSessionStartTime(Date.now());
@@ -550,6 +575,12 @@ export function InterviewLiveSession() {
       setFeedback(null);
       setCurrentQuestionIndex(0);
       setFollowUpQuestion(null);
+
+      // Request microphone access & setup audio analysis
+      await startMedia();
+
+      // Start speech recognition
+      startSpeechRecognition();
     } else {
       saveSessionToDb();
       stopMedia();
@@ -861,29 +892,60 @@ export function InterviewLiveSession() {
                     <div className="flex items-center gap-2 mb-4">
                         <Activity className={`${appState === "LISTENING" || appState === "SPEAKING" ? "text-green-500 animate-pulse" : "text-gray-400"}`} size={20} />
                         <h3 className="font-bold text-base">Your Spoken Answer</h3>
-                        {isSessionActive && (appState === "LISTENING" || appState === "SPEAKING") && (
-                          <span className="flex items-center gap-1.5 text-xs text-red-500 font-semibold ml-auto bg-red-500/10 px-2.5 py-1 rounded-full border border-red-500/20">
-                            <span className="w-2 h-2 rounded-full bg-red-500 animate-ping inline-block" /> Recording Audio
-                          </span>
+
+                        {/* Live Voice Input Level Meter */}
+                        {isSessionActive && (
+                          <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 px-2.5 py-1 rounded-full border border-gray-200 dark:border-gray-700 ml-1">
+                            <div className="w-2 h-2 rounded-full transition-colors duration-150" style={{ backgroundColor: audioLevel > 5 ? '#22c55e' : '#9ca3af' }} />
+                            <span className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">Mic:</span>
+                            <div className="w-14 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                              <div 
+                                className="h-full bg-blue-500 transition-all duration-75"
+                                style={{ width: `${isMicOn ? Math.min(100, Math.max(audioLevel, 0)) : 0}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] font-mono text-gray-500 dark:text-gray-400">{Math.round(isMicOn ? audioLevel : 0)}%</span>
+                          </div>
                         )}
-                        {appState === "ANALYZING" && <span className="text-xs ml-auto text-purple-500 animate-pulse font-medium">Analyzing Answer...</span>}
+
+                        <button 
+                          type="button"
+                          onClick={() => setIsManualEditing(!isManualEditing)}
+                          className="text-xs text-blue-500 hover:text-blue-400 font-medium ml-auto px-2 py-1 rounded-lg hover:bg-blue-500/10 transition"
+                        >
+                          {isManualEditing ? "🎤 Voice Mode" : "✏️ Type / Edit"}
+                        </button>
                     </div>
                     
-                    <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-950 rounded-xl p-4 border border-gray-100 dark:border-gray-800 min-h-[200px]">
-                        {transcriptParagraphs.map((p, i) => (
-                          <p key={i} className="text-gray-800 dark:text-gray-200 leading-relaxed mb-2">{p}</p>
-                        ))}
-                        {transcript || interimTranscript ? (
-                        <p className="text-gray-800 dark:text-gray-200 leading-relaxed whitespace-pre-wrap text-base">
-                            {transcript}
-                            <span className="text-blue-500 dark:text-blue-400 italic"> {interimTranscript}</span>
-                        </p>
-                        ) : transcriptParagraphs.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center text-gray-400 italic text-sm gap-2">
-                            <Mic size={24} className="text-blue-500/50 animate-bounce" />
-                            <span>{appState === "LISTENING" ? "Listening... Speak your answer aloud." : "Ready to speak."}</span>
-                        </div>
-                        ) : null}
+                    <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-950 rounded-xl p-4 border border-gray-100 dark:border-gray-800 min-h-[200px] flex flex-col">
+                        {isManualEditing ? (
+                          <textarea
+                            value={transcript}
+                            onChange={(e) => {
+                              setTranscript(e.target.value);
+                              segmentBufferRef.current = e.target.value;
+                            }}
+                            placeholder="Type or edit your answer here..."
+                            className="w-full flex-1 min-h-[160px] bg-transparent text-gray-800 dark:text-gray-100 placeholder-gray-400 text-base outline-none resize-none"
+                          />
+                        ) : (
+                          <>
+                            {transcriptParagraphs.map((p, i) => (
+                              <p key={i} className="text-gray-800 dark:text-gray-200 leading-relaxed mb-2">{p}</p>
+                            ))}
+                            {transcript || interimTranscript ? (
+                            <p className="text-gray-800 dark:text-gray-200 leading-relaxed whitespace-pre-wrap text-base">
+                                {transcript}
+                                <span className="text-blue-500 dark:text-blue-400 italic"> {interimTranscript}</span>
+                            </p>
+                            ) : transcriptParagraphs.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-gray-400 italic text-sm gap-2 my-auto py-8">
+                                <Mic size={24} className="text-blue-500/50 animate-bounce" />
+                                <span>{appState === "LISTENING" ? "Listening... Speak your answer aloud or click 'Type / Edit'." : "Ready to speak."}</span>
+                            </div>
+                            ) : null}
+                          </>
+                        )}
                     </div>
 
                     {/* Audio Playback if available */}
@@ -899,17 +961,23 @@ export function InterviewLiveSession() {
                       {/* Big Prominent Analyze Button */}
                       <button 
                         onClick={handleManualAnalyze}
-                        disabled={appState === "ANALYZING" || (!transcript.trim() && !interimTranscript.trim())}
+                        disabled={appState === "ANALYZING" || isTranscribing || !isSessionActive}
                         className={`flex-[3] py-3.5 px-6 rounded-xl font-bold flex items-center justify-center gap-2 text-base transition-all shadow-md ${
-                          appState === "ANALYZING"
+                          appState === "ANALYZING" || isTranscribing
                             ? "bg-purple-600 text-white animate-pulse cursor-wait"
-                            : (transcript.trim() || interimTranscript.trim())
+                            : isSessionActive
                               ? "bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/30 scale-[1.01] cursor-pointer"
                               : "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed border border-gray-300 dark:border-gray-700"
                         }`}
                       >
                         <CheckCircle size={20} />
-                        <span>{appState === "ANALYZING" ? "Evaluating Answer..." : "Done Speaking — Analyze My Answer"}</span>
+                        <span>
+                          {isTranscribing 
+                            ? "Transcribing Voice with AI..." 
+                            : appState === "ANALYZING" 
+                              ? "Evaluating Answer..." 
+                              : "Done Speaking — Analyze My Answer"}
+                        </span>
                       </button>
 
                       <div className="flex items-center gap-2 flex-1">

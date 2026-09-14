@@ -6,6 +6,7 @@ import { cn, isMobileDevice } from "@/lib/utils";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { getGuestId } from "@/lib/auth";
+import { transcribeAudio } from "@/app/actions";
 import { CoachingFeedback, ComparisonFeedback, analyzeCommunicationSegment, compareAttempts, generateSessionDimensions, generateTotalInsights } from "@/app/actions";
 
 declare global {
@@ -117,11 +118,14 @@ export function LiveSession() {
   const isSpeakingRef = useRef<boolean>(false);
   const lastSpeakTimeRef = useRef<number>(0);
 
-  const setupAudioAnalysis = (stream: MediaStream) => {
+  const setupAudioAnalysis = async (stream: MediaStream) => {
     if (!audioContextRef.current) {
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
     const ctx = audioContextRef.current;
+    if (ctx && ctx.state === "suspended") {
+      await ctx.resume();
+    }
     
     if (!analyserRef.current) {
       const source = ctx.createMediaStreamSource(stream);
@@ -193,9 +197,6 @@ export function LiveSession() {
   };
 
   const startMedia = async () => {
-    if (isMobileDevice()) {
-      return;
-    }
     try {
       setPermissionError(false);
       const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
@@ -238,9 +239,34 @@ export function LiveSession() {
     if (mediaStream) mediaStream.getAudioTracks().forEach(t => t.enabled = newState);
   };
 
-  const handleAnalyzeNow = () => {
+  const handleAnalyzeNow = async () => {
     if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
-    const finalSegment = segmentBufferRef.current.trim();
+    let finalSegment = segmentBufferRef.current.trim();
+    if (!finalSegment && transcript.trim()) {
+      finalSegment = transcript.trim();
+    }
+
+    if ((!finalSegment || finalSegment.length < 10) && audioChunksRef.current.length > 0) {
+      try {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+          try { mediaRecorderRef.current.requestData(); } catch (e) {}
+        }
+        const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';
+        const blob = new Blob(audioChunksRef.current, { type: mime });
+        if (blob.size > 500) {
+          const arrayBuffer = await blob.arrayBuffer();
+          const base64 = Buffer.from(arrayBuffer).toString('base64');
+          const res = await transcribeAudio(base64, mime);
+          if (res.transcript && res.transcript.trim().length >= 5) {
+            finalSegment = res.transcript.trim();
+            setTranscript(finalSegment);
+          }
+        }
+      } catch (err) {
+        console.error("Audio cloud transcription fallback error in LiveSession:", err);
+      }
+    }
+
     if (finalSegment && finalSegment.length > 0) {
       latestState.current.triggerAnalysis(finalSegment);
     }
@@ -482,12 +508,10 @@ export function LiveSession() {
 
   const toggleSession = async () => {
     if (!isSessionActive) {
-      startRecognition();
-      if (!isMobileDevice()) {
-        await startMedia();
-        startRecording();
-      }
       setIsSessionActive(true);
+      await startMedia();
+      startRecording();
+      startRecognition();
       setSessionStartTime(Date.now());
       setSpeakingTimeMs(0);
       setAccumulatedFeedbacks([]);

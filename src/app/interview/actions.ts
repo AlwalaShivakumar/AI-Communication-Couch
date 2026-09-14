@@ -142,3 +142,44 @@ Provide your response strictly in the requested JSON format.`,
     return { serverError: `Gemini interview evaluation failed: ${error.message}` };
   }
 }
+
+export async function transcribeAudio(
+  base64Audio: string,
+  mimeType: string = "audio/webm"
+): Promise<{ transcript?: string; serverError?: string }> {
+  if (!base64Audio || base64Audio.length < 50) {
+    return { transcript: "" };
+  }
+
+  try {
+    const cleanMime = mimeType.split(";")[0] || "audio/webm";
+    const response = await ai.models.generateContent({
+      model: "gemini-3.6-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              inlineData: {
+                data: base64Audio,
+                mimeType: cleanMime,
+              },
+            },
+            {
+              text: "Transcribe the spoken words in this audio verbatim into plain, clean text. Return ONLY the transcribed words. If the audio is silent or contains only noise or breathing, return an empty response.",
+            },
+          ],
+        },
+      ],
+      config: {
+        temperature: 0.1,
+      },
+    });
+
+    const text = response.text?.trim() || "";
+    return { transcript: text };
+  } catch (error: any) {
+    console.error("AI audio transcription error:", error);
+    return { serverError: error.message || "Transcription failed" };
+  }
+}

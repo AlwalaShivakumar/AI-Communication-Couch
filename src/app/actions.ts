@@ -393,3 +393,5 @@ export async function generateSessionDimensions(feedbacks: any[]) {
   }
 }
 
+export { transcribeAudio } from "./interview/actions";
+
