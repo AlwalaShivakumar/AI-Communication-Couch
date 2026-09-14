@@ -1,0 +1,69 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Next.js Build & Outputs
+/.next/
+/out/
+/build
+/dist
+
+# Environment Variables & Secrets (CRITICAL: NEVER COMMIT KEYS)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+*.env
+# Allow example environment configuration
+!.env.example
+
+# Supabase Local
+/supabase/.temp/
+
+# Testing & Coverage
+/coverage
+*.lcov
+
+# Debug Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Operating System & IDE
+.DS_Store
+Thumbs.db
+*.pem
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Vercel
+.vercel
+
+# Temporary / Scratch files & Backups
+restore.txt
+*.tmp
+*.bak
+fix*.js
+modify*.js
+modify*.py
+remove*.js
+test*.js
+test*.ts
+check-supabase.ts
+inspect.js
