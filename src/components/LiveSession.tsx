@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Mic, MicOff, Play, Square, RefreshCw, AlertCircle, Activity, BrainCircuit, AlertTriangle, Send, CheckCircle, Pause } from "lucide-react";
 import { cn, isMobileDevice } from "@/lib/utils";
 import { useSearchParams } from "next/navigation";
+import ReactMarkdown from "react-markdown";
 import { supabase } from "@/lib/supabase";
 import { getGuestId } from "@/lib/auth";
 import { transcribeAudio } from "@/app/actions";
@@ -73,8 +74,9 @@ export function LiveSession() {
   const segmentBufferRef = useRef<string>("");
   const segmentTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
-  const [feedback, setFeedback] = useState<CoachingFeedback | null>(null);
+  const [markdownFeedback, setMarkdownFeedback] = useState<string>("");
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
   
   const [isRetryMode, setIsRetryMode] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -310,63 +312,47 @@ export function LiveSession() {
     setTranscriptParagraphs(prev => [...prev, textToAnalyze]);
     setTranscript("");
 
-    setAppState("ANALYZING");
+    setAppState("COACHING");
     setAnalysisError(null);
+    setMarkdownFeedback("");
+    setIsStreaming(true);
+
     try {
-      if (isRetryMode && previousAttempt && feedback) {
-        const { compareAttempts } = await import('@/app/actions');
-        const result = await compareAttempts(previousAttempt, textToAnalyze, feedback, selectedMode);
-        if (result && 'serverError' in result) {
-          setAnalysisError(result.serverError as string);
-          setAppState("COACHING");
-        } else if (result) {
-          setComparison(result as ComparisonFeedback);
-          setAccumulatedFeedbacks(prev => [...prev, {
-            transcript: textToAnalyze,
-            score: result.newScore,
-            biggest_weakness: "Retry",
-            fix: result.whatRemainsWeak,
-            is_retry: true,
-            retry_improvement: result.newScore - (feedback?.overallScore || 0),
-            raw_feedback: result
-          }]);
-          setAppState("COACHING");
-        } else {
-          setAppState("LISTENING");
-        }
-      } else {
-        const { analyzeCommunicationSegment } = await import('@/app/actions');
-        const jd = localStorage.getItem("target_jd") || undefined;
-        const result = await analyzeCommunicationSegment(textToAnalyze, selectedMode, jd);
-        if (result && 'serverError' in result) {
-          setAnalysisError(result.serverError as string);
-          setAppState("COACHING");
-        } else if (result) {
-          setFeedback(result as CoachingFeedback);
-          setPreviousAttempt(textToAnalyze);
+      const { data: { session } } = await supabase.auth.getSession();
+      const userId = session?.user?.id || undefined;
+      const jd = localStorage.getItem("target_jd") || undefined;
 
-          let weakness = result.communicationIssue?.description || result.coachingTip || "Needs improvement";
-          let fixText = result.coachingTip || "Try again";
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ segmentText: textToAnalyze, mode: selectedMode, contextJd: jd, userId })
+      });
 
-          setAccumulatedFeedbacks(prev => [...prev, {
-            transcript: textToAnalyze,
-            score: result.overallScore,
-            biggest_weakness: weakness,
-            fix: fixText,
-            is_retry: false,
-            retry_improvement: null,
-            raw_feedback: result,
-          }]);
+      if (!response.ok || !response.body) {
+        throw new Error("Failed to stream feedback from AI Coach.");
+      }
 
-          setAppState("COACHING");
-        } else {
-          setAppState("LISTENING");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let done = false;
+      let fullFeedback = "";
+
+      while (!done) {
+        const { value, done: doneReading } = await reader.read();
+        done = doneReading;
+        if (value) {
+          const chunkValue = decoder.decode(value, { stream: true });
+          fullFeedback += chunkValue;
+          setMarkdownFeedback(prev => prev + chunkValue);
         }
       }
+      setIsStreaming(false);
+      setPreviousAttempt(textToAnalyze);
+
     } catch (error: any) {
       console.error("Analysis failed:", error);
       setAnalysisError(error.message || "Failed to analyze response");
-      setAppState("COACHING");
+      setIsStreaming(false);
     }
   };
 
@@ -516,7 +502,8 @@ export function LiveSession() {
     setTranscriptParagraphs([]);
     setTranscript("");
     setInterimTranscript("");
-    setFeedback(null);
+    setMarkdownFeedback("");
+    setIsStreaming(false);
     setComparison(null);
     setIsRetryMode(false);
     setPreviousAttempt("");
@@ -631,7 +618,7 @@ export function LiveSession() {
   useEffect(() => {
   }, [false, isSessionActive]);
 
-  // NEW LAYOUT: 75% AI Coach / 25% Camera+Tools
+  // NEW LAYOUT: 75% AI Coach / 25% Tools
   if (!browserSupported) {
     return (
       <div className="flex items-center justify-center h-full min-h-[calc(100vh-4rem)] p-4 max-w-[1600px] mx-auto bg-gray-950 text-gray-200">
@@ -715,7 +702,7 @@ export function LiveSession() {
             </div>
             
             <div className="p-6 flex-1 overflow-y-auto">
-              {!feedback && !comparison && appState !== "ANALYZING" && (
+              {!markdownFeedback && !comparison && !isStreaming && appState !== "ANALYZING" && appState !== "COACHING" && (
                 <div className="h-full flex flex-col items-center justify-center text-center text-gray-500">
                   <div className="w-20 h-20 bg-gray-900 rounded-full flex items-center justify-center border border-gray-800 mb-6 shadow-xl">
                     <BrainCircuit size={32} className="text-gray-700" />
@@ -769,7 +756,7 @@ export function LiveSession() {
                      <div>
                        <p className="text-gray-400 text-sm mb-1 uppercase tracking-wider font-bold">New Score</p>
                        <div className="flex items-baseline gap-2">
-                         <span className={cn("text-4xl font-black", comparison.newScore > (feedback?.overallScore || 0) ? "text-green-400" : "text-gray-100")}>{comparison.newScore}</span>
+                         <span className={cn("text-4xl font-black", comparison.newScore > 0 ? "text-green-400" : "text-gray-100")}>{comparison.newScore}</span>
                          <span className="text-gray-600 font-medium text-lg">/ 100</span>
                        </div>
                      </div>
@@ -780,69 +767,23 @@ export function LiveSession() {
                 </div>
               )}
 
-              {/* Complex Feedback UI */}
-              {feedback && !comparison && !analysisError && appState === "COACHING" && (
+              {/* ChatGPT-style Streaming Feedback UI */}
+              {(markdownFeedback || isStreaming) && !comparison && appState === "COACHING" && (
                 <div className="flex flex-col gap-6 animate-in fade-in">
-                  
-                  {/* Top Level Score & Tip */}
-                  <div className="flex items-start justify-between bg-gray-900/50 p-6 rounded-2xl border border-gray-800">
-                    <div className="flex-1 pr-8">
-                      <span className="text-xs font-bold uppercase tracking-wider text-amber-500 mb-2 block">Primary Coaching Tip</span>
-                      <h3 className="text-2xl font-semibold text-gray-100 leading-snug">{feedback.coachingTip}</h3>
-                    </div>
-                    <div className="flex flex-col items-end shrink-0 pl-6 border-l border-gray-800">
-                      <span className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1 block">Score</span>
-                      <div className="flex items-baseline gap-1">
-                        <span className={cn("text-5xl font-black tracking-tighter", feedback.overallScore > 80 ? "text-green-400" : feedback.overallScore > 60 ? "text-amber-400" : "text-red-400")}>{feedback.overallScore}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                    {/* Communication Issue */}
-                    {feedback.communicationIssue?.detected && (
-                      <div className="p-5 bg-red-900/10 border border-red-900/30 rounded-xl flex flex-col gap-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-red-500 block">Communication Weakness</span>
-                        <h4 className="text-lg font-bold text-red-100">{feedback.communicationIssue.title}</h4>
-                        <p className="text-sm text-red-200/70">{feedback.communicationIssue.description}</p>
-                        <div className="mt-2 text-xs font-medium text-red-400/80 bg-red-950/40 p-2 rounded">
-                          <strong>Why it matters:</strong> {feedback.communicationIssue.whyItMatters}
-                        </div>
-                      </div>
+                  <div className="prose prose-invert prose-amber max-w-none text-gray-200">
+                    <ReactMarkdown>{markdownFeedback}</ReactMarkdown>
+                    {isStreaming && (
+                      <span className="inline-block w-2 h-4 bg-amber-500 animate-pulse ml-1 align-middle"></span>
                     )}
-
-                    {/* Language Correction */}
-                    {feedback.languageCorrection?.detected && (
-                      <div className="p-5 bg-orange-900/10 border border-orange-900/30 rounded-xl flex flex-col gap-2">
-                         <span className="text-[10px] font-bold uppercase tracking-wider text-orange-500 block">Grammar & Phrasing</span>
-                         <div className="text-sm text-gray-400 line-through decoration-red-500/50">{feedback.languageCorrection.original}</div>
-                         <div className="text-base font-semibold text-orange-100">{feedback.languageCorrection.corrected}</div>
-                         <p className="text-xs text-orange-200/70 mt-1">{feedback.languageCorrection.explanation}</p>
-                      </div>
-                    )}
-
-                    {/* Natural English */}
-                    {feedback.naturalEnglish?.detected && (
-                       <div className="p-5 bg-blue-900/10 border border-blue-900/30 rounded-xl flex flex-col gap-2">
-                         <span className="text-[10px] font-bold uppercase tracking-wider text-blue-500 block">Natural English</span>
-                         <div className="text-sm text-gray-400 italic">"{feedback.naturalEnglish.original}"</div>
-                         <div className="text-base font-semibold text-blue-100">"{feedback.naturalEnglish.betterVersion}"</div>
-                         <p className="text-xs text-blue-200/70 mt-1">{feedback.naturalEnglish.explanation}</p>
-                       </div>
-                    )}
-
                   </div>
 
                   {/* Retry Action Area */}
+                  {!isStreaming && (
                   <div className="mt-4 p-6 bg-gray-900 border border-gray-800 rounded-xl shadow-lg">
                      <div className="flex flex-col gap-4">
-                       <div>
-                         <span className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1 block">{feedback.retryRequired ? 'Required Retry' : 'Optional Retry'}</span>
-                         <p className="text-gray-200 text-lg">{feedback.retryInstruction}</p>
-                       </div>
                        <div className="flex gap-3">
                          <button onClick={resetSessionState} className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-xl font-bold transition-colors">
-                           Skip & Continue
+                           Continue Next
                          </button>
                          <button onClick={handleRetry} className="flex-[2] py-3 bg-amber-500 hover:bg-amber-400 text-black rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2 transition-transform hover:scale-[1.02]">
                            <RefreshCw size={20} /> Try Again Now
@@ -850,11 +791,11 @@ export function LiveSession() {
                        </div>
                      </div>
                   </div>
-
+                  )}
                 </div>
               )}
             </div>
-            
+
             {/* Live Transcript docked to bottom of AI panel */}
             <div className="min-h-36 bg-gray-950 border-t border-gray-800 p-4 overflow-y-auto relative flex flex-col">
                 <div className="flex justify-between items-center mb-2">

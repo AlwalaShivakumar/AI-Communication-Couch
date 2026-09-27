@@ -4,7 +4,8 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Mic, MicOff, Play, Square, RefreshCw, AlertCircle, Briefcase, Activity, BrainCircuit, ChevronRight, SkipForward, Volume2, VolumeX, Pause, CheckCircle, ChevronLeft, RotateCcw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { getGuestId } from "@/lib/auth";
-import { evaluateInterviewAnswer, InterviewEvaluation, transcribeAudio } from "@/app/interview/actions";
+import { transcribeAudio } from "@/app/interview/actions";
+import ReactMarkdown from "react-markdown";
 import Link from "next/link";
 import { isMobileDevice } from "@/lib/utils";
 
@@ -70,7 +71,8 @@ export function InterviewLiveSession() {
   const segmentBufferRef = useRef<string>("");
   const segmentTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const [feedback, setFeedback] = useState<InterviewEvaluation | null>(null);
+  const [markdownFeedback, setMarkdownFeedback] = useState<string>("");
+  const [isStreaming, setIsStreaming] = useState(false);
 
   
   const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
@@ -315,39 +317,51 @@ export function InterviewLiveSession() {
     setTranscript("");
     setInterimTranscript("");
 
-    setAppState("ANALYZING");
+    setAppState("FEEDBACK");
+    setMarkdownFeedback("");
+    setIsStreaming(true);
+    
     try {
       const jd = localStorage.getItem("target_jd") || undefined;
-      const result = await evaluateInterviewAnswer(currentQuestion, textToAnalyze, jd);
-      if (result && 'serverError' in result) {
-        setAppState("FEEDBACK");
-        setFeedback({
-          score: 0,
-          critique: result.serverError as string,
-          whatWasMissing: "Analysis Failed",
-          betterExample: "Please try again later. Rate limits may apply.",
-        });
-      } else if (result) {
-        setFeedback(result as InterviewEvaluation);
-        
-        setAccumulatedFeedbacks(prev => [...prev, {
-          transcript: textToAnalyze,
-          score: result.score,
-          biggest_weakness: result.whatWasMissing,
-          fix: result.critique,
-          is_retry: false,
-          retry_improvement: null,
-          raw_feedback: result,
-        }]);
+      const response = await fetch('/api/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: currentQuestion, answer: textToAnalyze, contextJd: jd })
+      });
 
-        // Keep current question visible! Only prepare follow-up when user clicks Next Question
-        setAppState("FEEDBACK");
-      } else {
-        setAppState("LISTENING");
+      if (!response.ok || !response.body) {
+        throw new Error("Failed to stream evaluation from AI Coach.");
       }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let done = false;
+      let fullFeedback = "";
+
+      while (!done) {
+        const { value, done: doneReading } = await reader.read();
+        done = doneReading;
+        if (value) {
+          const chunkValue = decoder.decode(value, { stream: true });
+          fullFeedback += chunkValue;
+          setMarkdownFeedback(prev => prev + chunkValue);
+        }
+      }
+      setIsStreaming(false);
+
+      setAccumulatedFeedbacks(prev => [...prev, {
+        transcript: textToAnalyze,
+        score: 0,
+        biggest_weakness: "Streaming Feedback",
+        fix: "See details",
+        is_retry: false,
+        retry_improvement: null,
+        raw_feedback: fullFeedback,
+      }]);
     } catch (error: any) {
       console.error("Analysis failed:", error);
       setAppState("LISTENING");
+      setIsStreaming(false);
     }
   };
 
@@ -589,11 +603,6 @@ export function InterviewLiveSession() {
         const { generateSessionDimensions } = await import('@/app/actions');
         const dimensions = await generateSessionDimensions(accumulatedFeedbacks);
         if (dimensions && dimensions.length > 0) {
-          const validBLScores = accumulatedFeedbacks.filter(f => typeof f.body_language_score === 'number').map(f => f.body_language_score);
-          if (validBLScores.length > 0) {
-            const avgBLScore = Math.round(validBLScores.reduce((a,b)=>a+b,0) / validBLScores.length);
-            dimensions.push({ dimension: "Body Language", score: avgBLScore });
-          }
 
           const dimensionInserts = dimensions.map((d: any) => ({
             session_id: sessionData.id,
@@ -620,7 +629,7 @@ export function InterviewLiveSession() {
       segmentBufferRef.current = "";
       setTranscriptParagraphs([]);
       setTranscript("");
-      setFeedback(null);
+      setMarkdownFeedback(""); setIsStreaming(false);
       setCurrentQuestionIndex(0);
       setFollowUpQuestion(null);
 
@@ -650,7 +659,7 @@ export function InterviewLiveSession() {
     setTranscript("");
     setInterimTranscript("");
     segmentBufferRef.current = "";
-    setFeedback(null);
+    setMarkdownFeedback(""); setIsStreaming(false);
     setAudioUrl(null);
     setAppState("LISTENING");
     startSpeechRecognition();
@@ -674,7 +683,7 @@ export function InterviewLiveSession() {
     setTranscript("");
     setInterimTranscript("");
     segmentBufferRef.current = "";
-    setFeedback(null);
+    setMarkdownFeedback(""); setIsStreaming(false);
     setAudioUrl(null);
     setAppState("LISTENING");
     startSpeechRecognition();
@@ -691,8 +700,8 @@ export function InterviewLiveSession() {
     stopRecording();
     setAudioUrl(null);
     
-    if (feedback?.followUpQuestion && !followUpQuestion) {
-       setFollowUpQuestion(feedback.followUpQuestion);
+    if (false && !followUpQuestion) {
+       setFollowUpQuestion(null);
     } else {
        setFollowUpQuestion(null);
        if (currentQuestionIndex < questions.length - 1) {
@@ -715,7 +724,7 @@ export function InterviewLiveSession() {
     setTranscript("");
     setInterimTranscript("");
     segmentBufferRef.current = "";
-    setFeedback(null);
+    setMarkdownFeedback(""); setIsStreaming(false);
     setAppState("LISTENING");
     startSpeechRecognition();
     const stream = mediaStreamRef.current || mediaStream;
@@ -1091,38 +1100,18 @@ export function InterviewLiveSession() {
                 <h3 className="text-lg font-bold">Coach Feedback</h3>
              </div>
 
-             {appState === "FEEDBACK" && feedback ? (
+             {appState === "FEEDBACK" && (markdownFeedback || isStreaming) ? (
                <div className="flex-1 overflow-y-auto space-y-6">
-                 <div className="flex items-center justify-between">
-                    <span className="font-semibold text-gray-600 dark:text-gray-400">Score</span>
-                    <span className={`text-2xl font-bold ${feedback.score >= 80 ? "text-green-500" : feedback.score >= 60 ? "text-yellow-500" : "text-red-500"}`}>
-                        {feedback.score}/100
-                    </span>
-                 </div>
-
-                 <div className="space-y-2">
-                    <h4 className="font-semibold text-red-500 flex items-center gap-2">Critique</h4>
-                    <p className="text-sm bg-red-50 dark:bg-red-900/10 p-3 rounded-lg border border-red-100 dark:border-red-900/30 text-gray-800 dark:text-gray-300">
-                        {feedback.critique}
-                    </p>
-                 </div>
-
-                 <div className="space-y-2">
-                    <h4 className="font-semibold text-amber-500 flex items-center gap-2">What Was Missing</h4>
-                    <p className="text-sm bg-amber-50 dark:bg-amber-900/10 p-3 rounded-lg border border-amber-100 dark:border-amber-900/30 text-gray-800 dark:text-gray-300">
-                        {feedback.whatWasMissing}
-                    </p>
-                 </div>
-
-                 <div className="space-y-2">
-                    <h4 className="font-semibold text-green-500 flex items-center gap-2">Better Approach</h4>
-                    <p className="text-sm bg-green-50 dark:bg-green-900/10 p-3 rounded-lg border border-green-100 dark:border-green-900/30 text-gray-800 dark:text-gray-300">
-                        {feedback.betterExample}
-                    </p>
+                 
+                 <div className="prose prose-sm dark:prose-invert prose-blue max-w-none text-gray-800 dark:text-gray-200">
+                    <ReactMarkdown>{markdownFeedback}</ReactMarkdown>
+                    {isStreaming && (
+                      <span className="inline-block w-2 h-4 bg-blue-500 animate-pulse ml-1 align-middle"></span>
+                    )}
                  </div>
 
                  {audioUrl && (
-                    <div className="space-y-2">
+                    <div className="space-y-2 mt-4">
                        <h4 className="font-semibold text-blue-500 flex items-center gap-2">Your Answer Recording</h4>
                        <div className="p-3 bg-blue-50 dark:bg-blue-900/10 rounded-lg border border-blue-100 dark:border-blue-900/30">
                           <audio key={audioUrl} controls src={audioUrl} className="w-full h-10 outline-none" />
@@ -1131,11 +1120,13 @@ export function InterviewLiveSession() {
                  )}
                  
                  <div className="mt-4 flex flex-col gap-2">
+                   {!isStreaming && (
+                     <>
                    <button
                      onClick={handleNextQuestion}
                      className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-colors shadow-md"
                    >
-                     {feedback?.followUpQuestion && !followUpQuestion ? "Answer Follow-up Question" : "Next Question"} <ChevronRight size={18} />
+                     { "Next Question"} <ChevronRight size={18} />
                    </button>
                    <div className="flex gap-2">
                      <button
@@ -1154,6 +1145,8 @@ export function InterviewLiveSession() {
                        <ChevronLeft size={16} /> Previous
                      </button>
                    </div>
+                   </>
+                   )}
                  </div>
                </div>
              ) : (

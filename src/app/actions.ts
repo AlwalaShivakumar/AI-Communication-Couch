@@ -355,7 +355,7 @@ export async function generateSessionDimensions(feedbacks: any[]) {
         },
       ],
       config: {
-        systemInstruction: "You are an AI Coach scoring a user. Evaluate their performance across 9 dimensions out of 100 based on the provided session data. If a dimension is not applicable (e.g., Body Language if there is no video data mentioned), score it 0 or omit it. The 9 dimensions: Grammar, Natural English, Fluency, Confidence, Storytelling, Logical Thinking, Filler Words, Public Speaking, Body Language. Return JSON array of objects with 'dimension' (string) and 'score' (number).",
+        systemInstruction: "You are an AI Coach scoring a user. Evaluate their performance across 8 dimensions out of 100 based on the provided session data. The 8 dimensions: Grammar, Natural English, Fluency, Confidence, Storytelling, Logical Thinking, Filler Words, Public Speaking. Return JSON array of objects with 'dimension' (string) and 'score' (number).",
         responseMimeType: "application/json",
         responseSchema: {
           type: "ARRAY",
