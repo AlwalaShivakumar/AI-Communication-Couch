@@ -3,6 +3,9 @@ import { supabase } from "@/lib/supabase";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+export const runtime = 'edge';
+export const dynamic = 'force-dynamic';
+
 export async function POST(req: Request) {
   try {
     const { segmentText, mode, contextJd, userId } = await req.json();
@@ -82,7 +85,9 @@ Start with the most important feedback immediately. Never use generic motivation
     return new Response(stream, {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
-        'Transfer-Encoding': 'chunked'
+        'Transfer-Encoding': 'chunked',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive'
       }
     });
 
