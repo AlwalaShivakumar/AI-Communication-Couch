@@ -388,8 +388,8 @@ export function InterviewLiveSession() {
       } catch (e) {}
     }
 
-    // Fallback: If Web Speech API captured nothing or <10 chars, transcribe voice audio via Gemini!
-    if (textToAnalyze.length < 10 && audioChunksRef.current.length > 0) {
+    // Always prioritize cloud transcription over Web Speech API if audio exists for perfect punctuation and accuracy
+    if (audioChunksRef.current.length > 0) {
       setIsTranscribing(true);
       try {
         const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';

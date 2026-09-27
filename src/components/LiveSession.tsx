@@ -271,7 +271,8 @@ export function LiveSession() {
       } catch (e) {}
     }
 
-    if ((!finalSegment || finalSegment.length < 10) && audioChunksRef.current.length > 0) {
+    // Always prioritize cloud transcription over Web Speech API if audio exists for perfect punctuation and accuracy
+    if (audioChunksRef.current.length > 0) {
       setIsTranscribing(true);
       try {
         const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';

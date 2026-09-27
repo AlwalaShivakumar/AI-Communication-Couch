@@ -40,7 +40,12 @@ USER PROFILE CONTEXT:
       contents: [
         {
           role: "user",
-          parts: [{ text: `Analyze the following spoken response:\n\n"${segmentText}"\n\n${profileContext}${contextJd && contextJd.length > 5 ? `\n\nTARGET JOB DESCRIPTION:\n${contextJd}\nEvaluate the user's response against the requirements of this job description.` : ""}` }],
+          parts: [{ text: `The user is practicing their communication skills in "${mode || 'General'}" mode.
+Analyze the following spoken response:
+
+"${segmentText}"
+
+${profileContext}${contextJd && contextJd.length > 5 ? `\n\nTARGET JOB DESCRIPTION (if relevant for the mode):\n${contextJd}\nEvaluate the user's response taking this context into account.` : ""}` }],
         },
       ],
       config: {
