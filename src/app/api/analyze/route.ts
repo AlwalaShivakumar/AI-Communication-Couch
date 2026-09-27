@@ -72,11 +72,10 @@ Start with the most important feedback immediately. Never use generic motivation
               controller.enqueue(encoder.encode(chunk.text));
             }
           }
+          controller.close();
         } catch (error) {
           console.error('Stream error:', error);
           controller.error(error);
-        } finally {
-          controller.close();
         }
       }
     });
@@ -84,9 +83,8 @@ Start with the most important feedback immediately. Never use generic motivation
     return new Response(stream, {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
-        'Transfer-Encoding': 'chunked',
         'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive'
+        'X-Content-Type-Options': 'nosniff'
       }
     });
 
