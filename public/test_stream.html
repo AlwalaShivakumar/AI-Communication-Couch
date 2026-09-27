@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <div id="output"></div>
+  <script>
+    async function testStream() {
+      const response = await fetch('http://localhost:3000/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ segmentText: "hello world this is a test" })
+      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while(true) {
+        const { done, value } = await reader.read();
+        if(done) break;
+        const text = decoder.decode(value, { stream: true });
+        console.log("Chunk:", text);
+        document.getElementById('output').innerText += text;
+      }
+    }
+    testStream();
+  </script>
+</body>
+</html>

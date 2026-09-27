@@ -2,7 +2,6 @@ import { GoogleGenAI } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
