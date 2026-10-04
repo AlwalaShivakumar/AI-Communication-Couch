@@ -4,21 +4,24 @@ import React, { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { UserCircle, Save, Loader2, Target, Briefcase, Award, TrendingUp, Calendar } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { getGuestId } from "@/lib/auth";
+import { useAuth } from "@/components/AuthProvider";
+import { saveProfile } from "@/app/actions";
+import { profileSchema } from "@/lib/validation";
 
 export default function ProfilePage() {
-  const [userId, setUserId] = useState<string | null>(null);
-  const [loadingAuth, setLoadingAuth] = useState(true);
-  
+  const auth = useAuth();
+  const userId = auth.user?.id ?? null;
+  const [loadedOwner, setLoadedOwner] = useState<string | null>(null);
+
   const [profile, setProfile] = useState({
     preferred_name: "",
     target_role: "",
     career_goal: "",
     experience_level: ""
   });
-  
+
   const [pacingProfile, setPacingProfile] = useState("Normal (4s)");
-  
+
   const [stats, setStats] = useState({
     totalSessions: 0,
     avgScore: 0
@@ -28,19 +31,23 @@ export default function ProfilePage() {
   const [saveMessage, setSaveMessage] = useState("");
 
   useEffect(() => {
+    let active = true;
+    if (!userId || auth.loading) return;
     async function checkAuthAndLoadProfile() {
       try {
-        const { data: { user } } = await supabase.auth.getUser();
-        const activeUserId = user?.id || getGuestId();
-        setUserId(activeUserId);
+        const activeUserId = userId!;
 
         // Fetch Profile
         const { data: profileData, error } = await supabase
           .from('profiles')
           .select('*')
           .eq('id', activeUserId)
-          .single();
+          .maybeSingle();
 
+        if (error) throw new Error("Profile could not be loaded.");
+        if (!active) return;
+        setProfile({ preferred_name: '', target_role: '', career_goal: '', experience_level: 'Entry Level' });
+        setStats({ totalSessions: 0, avgScore: 0 });
         if (profileData) {
           setProfile({
             preferred_name: profileData.preferred_name || "",
@@ -51,19 +58,20 @@ export default function ProfilePage() {
         }
 
         // Fetch Stats
-        const { data: sessionData } = await supabase
+        const { data: sessionData, error: statsError } = await supabase
           .from('sessions')
-          .select('id, session_feedbacks(overall_score)')
+          .select('id, overall_score')
           .eq('user_id', activeUserId);
 
+        if (statsError) throw new Error("Session statistics could not be loaded.");
+        if (!active) return;
         if (sessionData && sessionData.length > 0) {
           let totalScore = 0;
           let scoredSessions = 0;
-          
+
           sessionData.forEach(session => {
-             const feedback = session.session_feedbacks?.[0];
-             if (feedback && feedback.overall_score) {
-               totalScore += feedback.overall_score;
+             if (session.overall_score !== null) {
+               totalScore += session.overall_score;
                scoredSessions++;
              }
           });
@@ -75,16 +83,20 @@ export default function ProfilePage() {
         }
 
       } catch (err) {
-        console.error("Error loading profile:", err);
+        if (!active) return;
+        setProfile({ preferred_name: '', target_role: '', career_goal: '', experience_level: 'Entry Level' });
+        setStats({ totalSessions: 0, avgScore: 0 });
+        setSaveMessage(err instanceof Error ? err.message : "Profile could not be loaded.");
       } finally {
-        setLoadingAuth(false);
+        if (active) setLoadedOwner(userId);
       }
     }
 
-    checkAuthAndLoadProfile();
+    void checkAuthAndLoadProfile();
     const savedPacing = localStorage.getItem("pacing_profile");
-    if (savedPacing) setPacingProfile(savedPacing);
-  }, []);
+    if (savedPacing) queueMicrotask(() => setPacingProfile(savedPacing));
+    return () => { active = false; };
+  }, [userId, auth.loading]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     setProfile(prev => ({ ...prev, [e.target.name]: e.target.value }));
@@ -98,28 +110,22 @@ export default function ProfilePage() {
     setSaveMessage("");
 
     try {
-      const { error } = await supabase
-        .from('profiles')
-        .upsert({ 
-          id: userId,
-          ...profile,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'id' });
-
-      if (error) throw error;
-      
+      profileSchema.parse(profile);
+      const result = await saveProfile(profile);
+      if ("serverError" in result) throw new Error(result.serverError);
       localStorage.setItem("pacing_profile", pacingProfile);
       setSaveMessage("Profile saved successfully!");
       setTimeout(() => setSaveMessage(""), 3000);
-    } catch (err: any) {
-      console.error("Failed to save profile:", err);
+    } catch (err) {
+      void err;
       setSaveMessage("Failed to save profile. Please try again.");
     } finally {
       setIsSaving(false);
     }
   };
 
-  if (loadingAuth) {
+  if (auth.error) return <div className="p-8"><p role="alert">{auth.error}</p><button onClick={() => void auth.refresh()} className="mt-4 text-blue-400">Retry account verification</button></div>;
+  if (auth.loading || !userId || loadedOwner !== userId) {
     return (
       <div className="min-h-[80vh] flex items-center justify-center">
         <Loader2 className="animate-spin text-blue-500" size={40} />
@@ -133,10 +139,10 @@ export default function ProfilePage() {
   return (
     <div className="min-h-[calc(100vh-4rem)] bg-gray-950 p-4 md:p-8 text-gray-200">
       <div className="max-w-6xl mx-auto flex flex-col md:flex-row gap-8">
-        
+
         {/* LEFT COLUMN: Profile Card & Stats */}
         <div className="w-full md:w-1/3 flex flex-col gap-6">
-          
+
           {/* Avatar Card */}
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 flex flex-col items-center text-center shadow-lg relative overflow-hidden">
             {/* Decorative background blur */}
@@ -146,17 +152,17 @@ export default function ProfilePage() {
             <div className="w-28 h-28 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-4xl font-black text-white shadow-xl mb-4 border-4 border-gray-900">
               {initial}
             </div>
-            
+
             <h2 className="text-2xl font-bold text-white mb-1">
-              {profile.preferred_name || "Anonymous User"}
+              {profile.preferred_name || (auth.user?.is_anonymous ? "Guest user" : "Your profile")}
             </h2>
             <p className="text-blue-400 font-medium flex items-center justify-center gap-2">
               <Briefcase size={16} />
               {profile.target_role || "Target Role Not Set"}
             </p>
-            
+
             <div className="w-full h-px bg-gray-800 my-6" />
-            
+
             {/* Quick Stats */}
             <div className="w-full grid grid-cols-2 gap-4">
               <div className="bg-gray-950 border border-gray-800 p-4 rounded-xl flex flex-col items-center">
@@ -181,8 +187,8 @@ export default function ProfilePage() {
               The AI Coach uses your profile context to tailor its feedback. A Senior Engineer will be graded much more rigorously than an Entry Level applicant.
             </p>
             <div className="w-full bg-gray-800 rounded-full h-2">
-              <div 
-                className="bg-blue-500 h-2 rounded-full transition-all duration-1000" 
+              <div
+                className="bg-blue-500 h-2 rounded-full transition-all duration-1000"
                 style={{ width: ([profile.preferred_name, profile.target_role, profile.career_goal].filter(Boolean).length * 33) + '%' }}
               />
             </div>
@@ -193,29 +199,30 @@ export default function ProfilePage() {
         {/* RIGHT COLUMN: Settings Form */}
         <div className="w-full md:w-2/3">
           <div className="bg-gray-900 border border-gray-800 rounded-2xl shadow-lg overflow-hidden flex flex-col h-full">
-            
+
             <div className="p-6 border-b border-gray-800 bg-gray-900/50">
               <h2 className="text-2xl font-bold text-white flex items-center gap-3">
-                <UserCircle size={28} className="text-blue-500" /> 
+                <UserCircle size={28} className="text-blue-500" />
                 Profile Settings
               </h2>
               <p className="text-gray-400 mt-1">Manage your professional identity and coaching goals.</p>
             </div>
 
             <form onSubmit={handleSave} className="p-6 md:p-8 flex-1 flex flex-col gap-8">
-              
+
               {/* Personal Details Section */}
               <div className="space-y-6">
                 <h3 className="text-sm font-bold uppercase tracking-wider text-gray-500 flex items-center gap-2 border-b border-gray-800 pb-2">
                   <UserCircle size={16} /> Personal Details
                 </h3>
-                
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-semibold text-gray-300">Preferred Name</label>
-                    <input 
+                    <input
                       type="text"
                       name="preferred_name"
+                      maxLength={100}
                       value={profile.preferred_name}
                       onChange={handleChange}
                       placeholder="e.g. Alex"
@@ -225,9 +232,10 @@ export default function ProfilePage() {
 
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-semibold text-gray-300">Target Role</label>
-                    <input 
+                    <input
                       type="text"
                       name="target_role"
+                      maxLength={200}
                       value={profile.target_role}
                       onChange={handleChange}
                       placeholder="e.g. Product Manager"
@@ -242,7 +250,7 @@ export default function ProfilePage() {
                 <h3 className="text-sm font-bold uppercase tracking-wider text-gray-500 flex items-center gap-2 border-b border-gray-800 pb-2">
                   <Target size={16} /> Coaching Context
                 </h3>
-                
+
                 <div className="flex flex-col gap-2">
                   <label className="text-sm font-semibold text-gray-300">Experience Level</label>
                   <select
@@ -258,7 +266,7 @@ export default function ProfilePage() {
                     <option value="Executive">Executive / C-Suite</option>
                   </select>
                 </div>
-                
+
                 <div className="flex flex-col gap-2">
                   <label className="text-sm font-semibold text-gray-300 flex justify-between items-center">
                     <span>Pacing Profile (Silence Timeout)</span>
@@ -279,8 +287,9 @@ export default function ProfilePage() {
                     <span>Career & Communication Goals</span>
                     <span className="text-xs font-normal text-gray-500">Used by the AI to grade you</span>
                   </label>
-                  <textarea 
+                  <textarea
                     name="career_goal"
+                    maxLength={2000}
                     value={profile.career_goal}
                     onChange={handleChange}
                     placeholder="e.g. I tend to ramble when asked open-ended questions. I want to learn to use the STAR method natively and project more confidence."
@@ -291,12 +300,12 @@ export default function ProfilePage() {
 
               {/* Action Footer */}
               <div className="mt-auto pt-6 flex items-center justify-between border-t border-gray-800">
-                <span className={cn("text-sm font-bold px-4 py-2 rounded-lg transition-all duration-300", 
-                  saveMessage ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2", 
+                <span className={cn("text-sm font-bold px-4 py-2 rounded-lg transition-all duration-300",
+                  saveMessage ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2",
                   saveMessage.includes("Failed") ? "bg-red-500/10 text-red-400" : "bg-green-500/10 text-green-400")}>
                   {saveMessage}
                 </span>
-                <button 
+                <button
                   type="submit"
                   disabled={isSaving}
                   className="px-8 py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-blue-900/20 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5"

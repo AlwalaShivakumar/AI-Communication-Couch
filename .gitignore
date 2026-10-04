@@ -16,6 +16,7 @@
 
 # Environment Variables & Secrets (CRITICAL: NEVER COMMIT KEYS)
 .env
+.env.*
 .env.local
 .env.development.local
 .env.test.local
@@ -67,3 +68,5 @@ test*.js
 test*.ts
 check-supabase.ts
 inspect.js
+
+/scratch/

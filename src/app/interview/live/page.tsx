@@ -14,14 +14,14 @@ export default function InterviewLivePage() {
       try {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          setHasQuestions(true);
+          queueMicrotask(() => setHasQuestions(true));
           return;
         }
-      } catch (e) {
+      } catch {
         console.error("Failed to parse interview questions");
       }
     }
-    setHasQuestions(false);
+    queueMicrotask(() => setHasQuestions(false));
   }, []);
 
   if (hasQuestions === null) {

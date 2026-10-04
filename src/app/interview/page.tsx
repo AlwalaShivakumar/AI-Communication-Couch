@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import { Briefcase, ChevronRight, Loader2, FileText, Settings } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { ensureUser } from "@/lib/auth";
 import { generateInterviewQuestions } from "./actions";
 
 export default function InterviewPrep() {
@@ -15,8 +16,8 @@ export default function InterviewPrep() {
   React.useEffect(() => {
     const savedJD = localStorage.getItem("target_jd");
     const savedFocus = localStorage.getItem("target_focus");
-    if (savedJD) setJobDescription(savedJD);
-    if (savedFocus) setFocus(savedFocus);
+    if (savedJD) queueMicrotask(() => setJobDescription(savedJD));
+    if (savedFocus) queueMicrotask(() => setFocus(savedFocus));
   }, []);
 
   React.useEffect(() => {
@@ -28,6 +29,7 @@ export default function InterviewPrep() {
     if (!jobDescription.trim()) return;
     setIsGenerating(true);
     try {
+      await ensureUser();
       const formData = new FormData();
       formData.append("jobDescription", jobDescription);
       formData.append("focus", focus);
@@ -63,9 +65,10 @@ export default function InterviewPrep() {
         <label className="font-medium text-gray-900 dark:text-gray-100 flex items-center gap-2">
           <Briefcase size={18} /> Job Description
         </label>
-        <textarea 
+        <textarea
           value={jobDescription}
           onChange={(e) => setJobDescription(e.target.value)}
+          maxLength={20000}
           placeholder="Paste the job description here..."
           className="w-full h-48 p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none text-sm resize-none"
         />
@@ -92,15 +95,15 @@ export default function InterviewPrep() {
         <label className="font-medium text-gray-900 dark:text-gray-100 flex items-center gap-2 mt-4">
           <FileText size={18} /> Resume (Optional, .pdf, .txt, .docx)
         </label>
-        <input 
+        <input
           type="file"
           accept=".pdf,.txt,.docx"
           onChange={(e) => setResumeFile(e.target.files?.[0] || null)}
           className="w-full p-2 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
         />
-        
+
         <div className="flex justify-end mt-4">
-          <button 
+          <button
             onClick={handleStart}
             disabled={!jobDescription.trim() || isGenerating}
             className="px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors flex items-center gap-2 disabled:opacity-50"

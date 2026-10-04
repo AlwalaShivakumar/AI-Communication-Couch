@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { AuthStatus } from "./AuthStatus";
 import { usePathname } from "next/navigation";
 
 export function Navigation() {
@@ -31,6 +32,7 @@ export function Navigation() {
           </Link>
         );
       })}
+      <AuthStatus />
     </nav>
   );
 }

@@ -1,39 +1,23 @@
 "use client";
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { Mic, MicOff, Play, Square, RefreshCw, AlertCircle, Briefcase, Activity, BrainCircuit, ChevronRight, SkipForward, Volume2, VolumeX, Pause, CheckCircle, ChevronLeft, RotateCcw } from "lucide-react";
-import { supabase } from "@/lib/supabase";
-import { getGuestId } from "@/lib/auth";
+import { Mic, MicOff, Play, Square, AlertCircle, Briefcase, Activity, BrainCircuit, ChevronRight, SkipForward, Volume2, VolumeX, CheckCircle, ChevronLeft, RotateCcw } from "lucide-react";
+import { ensureUser } from "@/lib/auth";
+import { savePracticeSession } from "@/app/actions";
+import { Feedback, PracticeSessionInput, questionsSchema } from "@/lib/validation";
+import { readFeedback } from "@/lib/stream-protocol";
+import { blobToBase64, finalizeRecording } from "@/lib/recording";
+import type { SpeechRecognitionLike } from "@/lib/speech";
 import { transcribeAudio } from "@/app/interview/actions";
-import ReactMarkdown from "react-markdown";
+import { CoachingMarkdown as ReactMarkdown } from "./CoachingMarkdown";
 import Link from "next/link";
 import { isMobileDevice } from "@/lib/utils";
 
-declare global {
-  interface Window {
-    SpeechRecognition: any;
-    webkitSpeechRecognition: any;
-  }
-}
 
 type SessionState = "IDLE" | "ASKING" | "LISTENING" | "SPEAKING" | "ANALYZING" | "FEEDBACK";
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const dataUrl = reader.result as string;
-      const base64 = dataUrl ? dataUrl.split(",")[1] || "" : "";
-      resolve(base64);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
-
-
 export function InterviewLiveSession() {
-    
+
   const [questions, setQuestions] = useState<string[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [followUpQuestion, setFollowUpQuestion] = useState<string | null>(null);
@@ -44,13 +28,14 @@ export function InterviewLiveSession() {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [speechSupported, setSpeechSupported] = useState(true);
-  
+
   const [isTTSMuted, setIsTTSMuted] = useState(false);
   const [shortResponseError, setShortResponseError] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isManualEditing, setIsManualEditing] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
+  const [isPaused] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -64,7 +49,7 @@ export function InterviewLiveSession() {
   const [transcriptParagraphs, setTranscriptParagraphs] = useState<string[]>([]);
   const [transcript, setTranscript] = useState("");
   const [interimTranscript, setInterimTranscript] = useState("");
-  const recognitionRef = useRef<any>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const isRecognitionRunningRef = useRef<boolean>(false);
 
   const finalizedPrefixRef = useRef<string>("");
@@ -74,17 +59,29 @@ export function InterviewLiveSession() {
   const [markdownFeedback, setMarkdownFeedback] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState(false);
 
-  
+
   const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
   const [speakingTimeMs, setSpeakingTimeMs] = useState<number>(0);
-  const [accumulatedFeedbacks, setAccumulatedFeedbacks] = useState<any[]>([]);
+  const [accumulatedFeedbacks, setAccumulatedFeedbacks] = useState<Feedback[]>([]);
+  const feedbacksRef = useRef<Feedback[]>([]);
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const analysisBusyRef = useRef(false);
+  const transcriptionBusyRef = useRef(false);
+  const answerVersionRef = useRef(0);
+  const retryRef = useRef(false);
+  const sessionIdRef = useRef("");
+  const pendingSaveRef = useRef<PracticeSessionInput | null>(null);
+  const savingRef = useRef(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const cancelAnalysis = () => { if (segmentTimeoutRef.current) { clearTimeout(segmentTimeoutRef.current); segmentTimeoutRef.current = null; } answerVersionRef.current++; analysisAbortRef.current?.abort(); analysisBusyRef.current = false; setIsStreaming(false); };
   const isSpeakingRef = useRef<boolean>(false);
   const lastSpeakTimeRef = useRef<number>(0);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
-        setSpeechSupported(false);
+        queueMicrotask(() => setSpeechSupported(false));
       }
     }
   }, []);
@@ -93,8 +90,9 @@ export function InterviewLiveSession() {
     const stored = localStorage.getItem("interview_questions");
     if (stored) {
       try {
-        setQuestions(JSON.parse(stored));
-      } catch (e) {
+        const parsed = questionsSchema.safeParse(JSON.parse(stored));
+        if (parsed.success) queueMicrotask(() => setQuestions(parsed.data));
+      } catch {
         console.error("Failed to parse interview questions");
       }
     }
@@ -106,12 +104,12 @@ export function InterviewLiveSession() {
         cancelAnimationFrame(animationFrameRef.current);
       }
       if (analyserRef.current) {
-        try { analyserRef.current.disconnect(); } catch (e) {}
+        try { analyserRef.current.disconnect(); } catch {}
         analyserRef.current = null;
       }
 
       if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (AudioCtx) {
           audioContextRef.current = new AudioCtx();
         }
@@ -133,7 +131,7 @@ export function InterviewLiveSession() {
       const dataArray = new Uint8Array(analyser.fftSize);
 
       const draw = () => {
-        if (!analyserRef.current || !latestState.current.isMicOn) {
+        if (!analyserRef.current || !latestState.current.isMicOn || latestState.current.isPaused) {
           setAudioLevel(0);
           animationFrameRef.current = requestAnimationFrame(draw);
           return;
@@ -175,14 +173,14 @@ export function InterviewLiveSession() {
       };
 
       draw();
-    } catch (e) {
-      console.warn("setupAudioAnalysis error:", e);
+    } catch {
+      console.warn("Audio analysis could not start.");
     }
   };
 
   const cleanupAudioAnalysis = () => {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    if (audioContextRef.current?.state !== 'closed') audioContextRef.current?.close();
+    if (audioContextRef.current?.state !== 'closed') audioContextRef.current?.close().catch(() => {});
     audioContextRef.current = null;
     analyserRef.current = null;
   };
@@ -197,10 +195,11 @@ export function InterviewLiveSession() {
       stream.getAudioTracks().forEach(t => t.enabled = isMicOn);
 
       await setupAudioAnalysis(stream);
-      startRecording(stream);
-    } catch (err: any) {
-      console.error("Error accessing media devices.", err);
+      return true;
+    } catch {
+      console.error("Session operation failed.");
       setMediaError("Could not access microphone. Please check your browser permissions and allow microphone access.");
+      return false;
     }
   };
 
@@ -215,37 +214,17 @@ export function InterviewLiveSession() {
     cleanupAudioAnalysis();
   };
 
-  const toggleMic = () => {
-    const newState = !isMicOn;
-    setIsMicOn(newState);
-    const stream = mediaStreamRef.current || mediaStream;
-    if (stream) stream.getAudioTracks().forEach(t => t.enabled = newState);
-    if (!newState) {
-      stopSpeechRecognition();
-    } else if (isSessionActive && !isPaused) {
-      startSpeechRecognition();
-    }
-  };
-
   const currentQuestion = followUpQuestion || questions[currentQuestionIndex] || "";
-
-  const replayQuestion = () => {
-    if ('speechSynthesis' in window && currentQuestion && !isTTSMuted) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(currentQuestion);
-      window.speechSynthesis.speak(utterance);
-    }
-  };
 
   const startRecording = useCallback((streamToUse?: MediaStream) => {
     const activeStream = streamToUse || mediaStreamRef.current || mediaStream;
     if (!activeStream) return;
-    
+
     // Stop any existing active recorder
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       try {
         mediaRecorderRef.current.stop();
-      } catch (e) {}
+      } catch {}
     }
 
     try {
@@ -263,29 +242,30 @@ export function InterviewLiveSession() {
       }
       const options = mimeType ? { mimeType } : undefined;
       const recorder = new MediaRecorder(activeStream, options);
-      audioChunksRef.current = [];
-      
+      const chunks: Blob[] = [];
+      audioChunksRef.current = chunks;
+
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
-          audioChunksRef.current.push(e.data);
+          chunks.push(e.data);
         }
       };
-      
+
       recorder.onstop = () => {
-        if (audioChunksRef.current.length > 0) {
+        if (mediaRecorderRef.current === recorder && chunks.length > 0) {
           const finalMime = recorder.mimeType || mimeType || 'audio/webm';
-          const audioBlob = new Blob(audioChunksRef.current, { type: finalMime });
+          const audioBlob = new Blob(chunks, { type: finalMime });
           if (audioBlob.size > 0) {
             const url = URL.createObjectURL(audioBlob);
             setAudioUrl(url);
           }
         }
       };
-      
+
       recorder.start(250);
       mediaRecorderRef.current = recorder;
-    } catch (e) {
-      console.error("Failed to start recording:", e);
+    } catch {
+      console.error("Session operation failed.");
     }
   }, [mediaStream]);
 
@@ -296,138 +276,82 @@ export function InterviewLiveSession() {
           mediaRecorderRef.current.requestData();
         }
         mediaRecorderRef.current.stop();
-      } catch (e) {
-        console.error("Error stopping recorder", e);
+      } catch {
+        console.error("Session operation failed.");
       }
     }
   }, []);
 
   const triggerAnalysis = async (textToAnalyze: string) => {
-    if (textToAnalyze.trim().length < 10) {
-      setShortResponseError(true);
-      setTimeout(() => setShortResponseError(false), 4000);
-      return;
-    }
-
-    // Stop recording immediately so user's answer audio is finalized
+    if (analysisBusyRef.current) return;
+    if (feedbacksRef.current.length >= 50) { setMediaError("This session has reached its feedback limit. Please end it and start a new session."); return; }
+    if (textToAnalyze.trim().length < 10) { setShortResponseError(true); return; }
+    analysisBusyRef.current = true;
+    const request = new AbortController();
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = request;
     stopRecording();
-
+    stopSpeechRecognition();
+    finalizedPrefixRef.current = "";
     segmentBufferRef.current = "";
     setTranscriptParagraphs(prev => [...prev, textToAnalyze]);
-    setTranscript("");
-    setInterimTranscript("");
-
+    setTranscript(""); setInterimTranscript("");
     setAppState("FEEDBACK");
-    setMarkdownFeedback("");
-    setIsStreaming(true);
-    
+    setMarkdownFeedback(""); setIsStreaming(true);
     try {
+      await ensureUser();
+      request.signal.throwIfAborted();
       const jd = localStorage.getItem("target_jd") || undefined;
       const response = await fetch('/api/evaluate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: request.signal,
         body: JSON.stringify({ question: currentQuestion, answer: textToAnalyze, contextJd: jd })
       });
-
-      if (!response.ok || !response.body) {
-        throw new Error("Failed to stream evaluation from AI Coach.");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let done = false;
-      let fullFeedback = "";
-
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        if (value) {
-          const chunkValue = decoder.decode(value, { stream: true });
-          fullFeedback += chunkValue;
-          setMarkdownFeedback(prev => prev + chunkValue);
-        }
-      }
-      setIsStreaming(false);
-
-      setAccumulatedFeedbacks(prev => [...prev, {
-        transcript: textToAnalyze,
-        score: 0,
-        biggest_weakness: "Streaming Feedback",
-        fix: "See details",
-        is_retry: false,
-        retry_improvement: null,
-        raw_feedback: fullFeedback,
-      }]);
-    } catch (error: any) {
-      console.error("Analysis failed:", error);
-      setAppState("LISTENING");
-      setIsStreaming(false);
+      const { markdown, result } = await readFeedback(response, text => { if (!request.signal.aborted) setMarkdownFeedback(text); }, request.signal);
+      request.signal.throwIfAborted();
+      const prior = feedbacksRef.current.at(-1);
+      const feedback: Feedback = { transcript: textToAnalyze, score: result.score, biggest_weakness: result.biggest_weakness, fix: result.fix, raw_feedback: markdown, dimensions: result.dimensions, is_retry: retryRef.current, retry_improvement: retryRef.current && prior ? result.score-prior.score : null };
+      feedbacksRef.current = [...feedbacksRef.current, feedback];
+      setAccumulatedFeedbacks(feedbacksRef.current);
+      retryRef.current = false;
+    } catch (error) {
+      if (!request.signal.aborted) setMediaError(error instanceof Error ? error.message : "Feedback could not be completed.");
+    } finally {
+      if (analysisAbortRef.current === request) { analysisBusyRef.current = false; setIsStreaming(false); }
     }
   };
-
   const handleManualAnalyze = async () => {
-    if (segmentTimeoutRef.current) {
-      clearTimeout(segmentTimeoutRef.current);
-      segmentTimeoutRef.current = null;
-    }
-    
-    let textToAnalyze = segmentBufferRef.current.trim();
-    if (!textToAnalyze || transcript.trim().length > textToAnalyze.length) {
-      textToAnalyze = transcript.trim();
-    }
-    if (interimTranscript.trim()) {
-      textToAnalyze = (textToAnalyze + " " + interimTranscript.trim()).trim();
-    }
-
-    // Flush recorder to finalize latest audio
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      try {
-        if (typeof mediaRecorderRef.current.requestData === "function") {
-          mediaRecorderRef.current.requestData();
-        }
-      } catch (e) {}
-    }
-
-    // Always prioritize cloud transcription over Web Speech API if audio exists for perfect punctuation and accuracy
-    if (audioChunksRef.current.length > 0) {
-      setIsTranscribing(true);
-      try {
-        const mime = mediaRecorderRef.current?.mimeType || 'audio/webm';
-        const blob = new Blob(audioChunksRef.current, { type: mime });
+    if (analysisBusyRef.current || transcriptionBusyRef.current) return;
+    transcriptionBusyRef.current = true;
+    stopSpeechRecognition();
+    const version = answerVersionRef.current;
+    if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
+    let text = segmentBufferRef.current.trim() || transcript.trim() || interimTranscript.trim();
+    try {
+      if (!isManualEditing) {
+        const blob = await finalizeRecording(mediaRecorderRef.current, audioChunksRef.current);
         if (blob.size > 200) {
-          const base64 = await blobToBase64(blob);
-          if (base64) {
-            const res = await transcribeAudio(base64, mime);
-            if (res.transcript && res.transcript.trim().length >= 2) {
-              textToAnalyze = res.transcript.trim();
-              setTranscript(textToAnalyze);
-              setTranscriptParagraphs(prev => [...prev, textToAnalyze]);
-            }
-          }
+          setIsTranscribing(true);
+          await ensureUser();
+          const result = await transcribeAudio(await blobToBase64(blob), blob.type || 'audio/webm');
+          if (answerVersionRef.current !== version) return;
+          if (result.serverError) throw new Error(result.serverError);
+          if (result.transcript?.trim()) text = result.transcript.trim();
         }
-      } catch (err) {
-        console.error("Audio cloud transcription fallback error:", err);
-      } finally {
-        setIsTranscribing(false);
       }
-    }
-
-    if (textToAnalyze.length >= 10) {
-      triggerAnalysis(textToAnalyze);
-    } else {
-      setShortResponseError(true);
-      setTimeout(() => setShortResponseError(false), 3500);
-    }
+      if (answerVersionRef.current !== version) return;
+      await triggerAnalysis(text);
+    } catch (error) {
+      if (answerVersionRef.current === version) setMediaError(error instanceof Error ? error.message : "Recording could not be analyzed.");
+    } finally { transcriptionBusyRef.current = false; setIsTranscribing(false); }
   };
-
-  const latestState = useRef({ isMicOn, isSessionActive, appState, currentQuestion, triggerAnalysis, isPaused });
+  const latestState = useRef({ isMicOn, isSessionActive, appState, currentQuestion, triggerAnalysis, isPaused, isManualEditing });
   useEffect(() => {
-    latestState.current = { isMicOn, isSessionActive, appState, currentQuestion, triggerAnalysis, isPaused };
-  }, [isMicOn, isSessionActive, appState, currentQuestion, triggerAnalysis, isPaused]);
+    latestState.current = { isMicOn, isSessionActive, appState, currentQuestion, triggerAnalysis, isPaused, isManualEditing };
+  });
 
   const speakingCheckRef = useRef<NodeJS.Timeout | null>(null);
 
-  const startSpeechRecognition = useCallback(() => {
+  const startSpeechRecognition = useCallback(function restartRecognition() {
     if (typeof window === "undefined") return;
 
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -442,7 +366,7 @@ export function InterviewLiveSession() {
         recognitionRef.current.onend = null;
         recognitionRef.current.onerror = null;
         recognitionRef.current.stop();
-      } catch (e) {}
+      } catch {}
       recognitionRef.current = null;
     }
 
@@ -454,9 +378,9 @@ export function InterviewLiveSession() {
       recognition.interimResults = true;
       recognition.lang = navigator.language || "en-US";
 
-      recognition.onresult = (event: any) => {
-        const { isMicOn, isPaused } = latestState.current;
-        if (!isMicOn || isPaused) return;
+      recognition.onresult = (event) => {
+        const { isMicOn, isPaused, isManualEditing } = latestState.current;
+        if (!isMicOn || isPaused || isManualEditing || analysisBusyRef.current) return;
 
         let sessionFinal = "";
         let sessionInterim = "";
@@ -472,7 +396,7 @@ export function InterviewLiveSession() {
 
         const cleanSessionFinal = sessionFinal.trim();
         const base = finalizedPrefixRef.current.trim();
-        const fullTranscript = base 
+        const fullTranscript = base
           ? (cleanSessionFinal ? `${base} ${cleanSessionFinal}` : base)
           : cleanSessionFinal;
 
@@ -493,7 +417,7 @@ export function InterviewLiveSession() {
         isRecognitionRunningRef.current = true;
       };
 
-      recognition.onerror = (e: any) => {
+      recognition.onerror = (e) => {
         console.warn("Interview speech recognition error:", e?.error);
         if (e?.error === 'not-allowed') {
           setMediaError("Microphone access was denied. Please allow microphone permissions in your mobile browser settings.");
@@ -511,8 +435,8 @@ export function InterviewLiveSession() {
           const { isSessionActive, isMicOn, isPaused, appState } = latestState.current;
           if (isSessionActive && isMicOn && !isPaused && appState !== "ANALYZING" && appState !== "FEEDBACK") {
             setTimeout(() => {
-              if (latestState.current.isSessionActive && !isRecognitionRunningRef.current) {
-                startSpeechRecognition();
+              if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused && !analysisBusyRef.current && !isRecognitionRunningRef.current) {
+                restartRecognition();
               }
             }, 300);
           }
@@ -521,8 +445,8 @@ export function InterviewLiveSession() {
 
       recognition.start();
       recognitionRef.current = recognition;
-    } catch (e) {
-      console.warn("Speech recognition failed to start:", e);
+    } catch {
+      console.warn("Recognition could not start.");
     }
   }, []);
 
@@ -534,96 +458,89 @@ export function InterviewLiveSession() {
         recognitionRef.current.onend = null;
         recognitionRef.current.onerror = null;
         recognitionRef.current.stop();
-      } catch (e) {}
+      } catch {}
       recognitionRef.current = null;
     }
     setInterimTranscript("");
   }, []);
 
+  const toggleMic = () => {
+    const newState = !isMicOn;
+    setIsMicOn(newState);
+    const stream = mediaStreamRef.current || mediaStream;
+    if (stream) stream.getAudioTracks().forEach(t => t.enabled = newState);
+    if (!newState) {
+      stopSpeechRecognition();
+    } else if (isSessionActive && !isPaused) {
+      startSpeechRecognition();
+    }
+  };
+
   useEffect(() => {
     return () => {
       stopSpeechRecognition();
-      if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
       if (speakingCheckRef.current) clearTimeout(speakingCheckRef.current);
     };
   }, [stopSpeechRecognition]);
 
   useEffect(() => {
-    if (isSessionActive && currentQuestion && 'speechSynthesis' in window && !isTTSMuted) {
+    if (!isSessionActive || !currentQuestion) return;
+    let cancelled = false;
+    const resumeAnswer = () => { if (cancelled || !latestState.current.isSessionActive) return; setAppState("LISTENING"); if (latestState.current.isMicOn && !latestState.current.isPaused) { startSpeechRecognition(); startRecording(); } };
+    queueMicrotask(() => {
+      if (cancelled) return;
+      if (!("speechSynthesis" in window) || isTTSMuted) { resumeAnswer(); return; }
       window.speechSynthesis.cancel();
+      stopSpeechRecognition(); stopRecording(); setAppState("ASKING");
       const utterance = new SpeechSynthesisUtterance(currentQuestion);
-      setAppState("ASKING");
-      stopSpeechRecognition();
-      utterance.onend = () => {
-        setAppState("LISTENING");
-        if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused) {
-          startSpeechRecognition();
-        }
-      };
-      utterance.onerror = () => {
-        setAppState("LISTENING");
-        if (latestState.current.isSessionActive && latestState.current.isMicOn && !latestState.current.isPaused) {
-          startSpeechRecognition();
-        }
-      };
+      utterance.onend = resumeAnswer; utterance.onerror = resumeAnswer;
       window.speechSynthesis.speak(utterance);
-    }
-  }, [currentQuestion, isSessionActive, isTTSMuted, stopSpeechRecognition, startSpeechRecognition]);
+    });
+    return () => { cancelled = true; if ("speechSynthesis" in window) window.speechSynthesis.cancel(); };
+  }, [currentQuestion, isSessionActive, isTTSMuted, stopSpeechRecognition, startSpeechRecognition, startRecording, stopRecording]);
 
-  const saveSessionToDb = async () => {
-    if (!sessionStartTime) return;
-    const duration = Date.now() - sessionStartTime;
-    const scoredFeedbacks = accumulatedFeedbacks.filter(f => f.score > 0);
-    const overallScore = scoredFeedbacks.length > 0
-      ? Math.round(scoredFeedbacks.reduce((acc, f) => acc + f.score, 0) / scoredFeedbacks.length)
-      : null;
-
-    try {
-      const { data: sessionData, error: sessionError } = await supabase
-        .from('sessions')
-        .insert({
-          mode: 'interview',
-          user_id: getGuestId(),
-          duration_ms: duration,
-          speaking_time_ms: speakingTimeMs,
-          overall_score: overallScore
-        })
-        .select('id')
-        .single();
-
-      if (sessionError) throw sessionError;
-
-      if (sessionData && accumulatedFeedbacks.length > 0) {
-        const feedbackInserts = accumulatedFeedbacks.map(f => ({
-          session_id: sessionData.id,
-          ...f
-        }));
-        await supabase.from('session_feedbacks').insert(feedbackInserts);
-
-        const { generateSessionDimensions } = await import('@/app/actions');
-        const dimensions = await generateSessionDimensions(accumulatedFeedbacks);
-        if (dimensions && dimensions.length > 0) {
-
-          const dimensionInserts = dimensions.map((d: any) => ({
-            session_id: sessionData.id,
-            dimension: d.dimension,
-            score: d.score
-          }));
-          await supabase.from('session_dimensions').insert(dimensionInserts);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to save interview session to Supabase:", err);
-    }
+  const replayQuestion = () => {
+    if (!("speechSynthesis" in window) || !currentQuestion || isTTSMuted) return;
+    const resume = isSessionActive && appState !== "FEEDBACK" && !isManualEditing;
+    stopSpeechRecognition(); stopRecording(); window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(currentQuestion);
+    const done = () => { if (resume && latestState.current.isSessionActive && latestState.current.isMicOn && !analysisBusyRef.current) { setAppState("LISTENING"); startSpeechRecognition(); startRecording(); } };
+    utterance.onend = done; utterance.onerror = done;
+    window.speechSynthesis.speak(utterance);
   };
 
+  const persistSession = async () => {
+    if (savingRef.current) return false;
+    if (!pendingSaveRef.current && sessionStartTime) {
+      const duration = Math.min(14400000, Date.now()-sessionStartTime);
+      const speaking = speakingTimeMs + (isSpeakingRef.current ? Date.now()-lastSpeakTimeRef.current : 0);
+      pendingSaveRef.current = { id: sessionIdRef.current, mode: 'interview', duration_ms: duration, speaking_time_ms: Math.max(0,Math.min(duration,speaking)), feedbacks: feedbacksRef.current };
+    }
+    if (!pendingSaveRef.current) return true;
+    savingRef.current = true; setIsSaving(true); setSaveError(null);
+    try {
+      const result = await savePracticeSession(pendingSaveRef.current);
+      if ("serverError" in result) throw new Error(result.serverError);
+      pendingSaveRef.current = null;
+      return true;
+    } catch (error) { setSaveError(error instanceof Error ? error.message : "Session was not saved."); return false; }
+    finally { savingRef.current = false; setIsSaving(false); }
+  };
   const toggleSession = async () => {
+    if (savingRef.current || pendingSaveRef.current) return;
+    cancelAnalysis();
     if (!isSessionActive) {
+      await ensureUser();
+      if (!await startMedia()) return;
       setIsSessionActive(true);
       setIsInterviewComplete(false);
       setSessionStartTime(Date.now());
       setSpeakingTimeMs(0);
+      isSpeakingRef.current = false;
+      lastSpeakTimeRef.current = Date.now();
+      feedbacksRef.current = [];
       setAccumulatedFeedbacks([]);
+      sessionIdRef.current = crypto.randomUUID();
       setAppState("LISTENING");
       finalizedPrefixRef.current = "";
       segmentBufferRef.current = "";
@@ -633,18 +550,15 @@ export function InterviewLiveSession() {
       setCurrentQuestionIndex(0);
       setFollowUpQuestion(null);
 
-      // Request microphone access & setup audio analysis
-      await startMedia();
 
-      // Start speech recognition
-      startSpeechRecognition();
+
     } else {
-      saveSessionToDb();
+      void persistSession();
       stopMedia();
       stopSpeechRecognition();
       if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-      
+
       setIsSessionActive(false);
       setAppState("IDLE");
       setAudioLevel(0);
@@ -652,6 +566,8 @@ export function InterviewLiveSession() {
   };
 
   const handleRetryQuestion = () => {
+    retryRef.current = true;
+    cancelAnalysis();
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     stopRecording();
     finalizedPrefixRef.current = "";
@@ -659,12 +575,14 @@ export function InterviewLiveSession() {
     setTranscript("");
     setInterimTranscript("");
     segmentBufferRef.current = "";
+    finalizedPrefixRef.current = "";
+    retryRef.current = true;
     setMarkdownFeedback(""); setIsStreaming(false);
     setAudioUrl(null);
     setAppState("LISTENING");
     startSpeechRecognition();
     const stream = mediaStreamRef.current || mediaStream;
-    if (stream && !isMobileDevice()) {
+    if (stream) {
       setTimeout(() => {
         startRecording(stream);
       }, 100);
@@ -672,6 +590,7 @@ export function InterviewLiveSession() {
   };
 
   const handlePreviousQuestion = () => {
+    cancelAnalysis();
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     stopRecording();
     if (followUpQuestion) {
@@ -696,20 +615,19 @@ export function InterviewLiveSession() {
   };
 
   const handleNextQuestion = () => {
+    cancelAnalysis();
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     stopRecording();
     setAudioUrl(null);
-    
-    if (false && !followUpQuestion) {
-       setFollowUpQuestion(null);
-    } else {
+
+    {
        setFollowUpQuestion(null);
        if (currentQuestionIndex < questions.length - 1) {
          setCurrentQuestionIndex(prev => prev + 1);
        } else {
          // Complete the interview
          setIsInterviewComplete(true);
-         saveSessionToDb();
+         void persistSession();
          stopMedia();
          stopSpeechRecognition();
          if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
@@ -719,7 +637,7 @@ export function InterviewLiveSession() {
          return;
        }
     }
-    
+
     setTranscriptParagraphs([]);
     setTranscript("");
     setInterimTranscript("");
@@ -739,56 +657,40 @@ export function InterviewLiveSession() {
     handleNextQuestion();
   };
 
-  const togglePause = () => {
-    setIsPaused(prev => {
-      const newState = !prev;
-      if (newState) {
-        if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
-        stopSpeechRecognition();
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-          try { mediaRecorderRef.current.pause(); } catch(e) {}
-        }
-      } else {
-        if (isSessionActive && isMicOn) {
-          startSpeechRecognition();
-        }
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "paused") {
-          try { mediaRecorderRef.current.resume(); } catch(e) {}
-        }
-      }
-      return newState;
-    });
-  };
-
   const startOver = () => {
     setIsInterviewComplete(false);
     setCurrentQuestionIndex(0);
     setFollowUpQuestion(null);
     setAccumulatedFeedbacks([]);
-    toggleSession();
+    void toggleSession().catch(() => setMediaError("Session could not be started."));
   };
 
   useEffect(() => {
+    const resources = { answerVersionRef, analysisAbortRef, mediaRecorderRef, segmentTimeoutRef };
     return () => {
-      stopMedia();
+      resources.answerVersionRef.current++;
+      resources.analysisAbortRef.current?.abort();
+      if (resources.mediaRecorderRef.current) { resources.mediaRecorderRef.current.onstop = null; }
+      mediaStreamRef.current?.getTracks().forEach(track => track.stop());
+      cleanupAudioAnalysis();
+      stopRecording();
       if (recognitionRef.current) recognitionRef.current.stop();
-      if (segmentTimeoutRef.current) clearTimeout(segmentTimeoutRef.current);
+      if (resources.segmentTimeoutRef.current) clearTimeout(resources.segmentTimeoutRef.current);
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     };
-  }, []);
+  }, [stopRecording]);
 
-  useEffect(() => {
-  }, [isSessionActive]);
+
 
   if (isInterviewComplete) {
-    const scoredFeedbacks = accumulatedFeedbacks.filter(f => f.score > 0);
+    const scoredFeedbacks = accumulatedFeedbacks;
     const overallScore = scoredFeedbacks.length > 0
       ? Math.round(scoredFeedbacks.reduce((acc, f) => acc + f.score, 0) / scoredFeedbacks.length)
       : 0;
-      
+
     let bestScore = 0;
     let worstScore = 100;
-    
+
     scoredFeedbacks.forEach(f => {
       if (f.score > bestScore) bestScore = f.score;
       if (f.score < worstScore) worstScore = f.score;
@@ -800,10 +702,12 @@ export function InterviewLiveSession() {
 
     return (
       <div className="flex flex-col h-full min-h-[calc(100vh-4rem)] p-4 max-w-[1600px] mx-auto bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-200 justify-center items-center">
+      {saveError && <div role="alert" className="p-4 border border-red-500 rounded-lg text-red-400">{saveError} <button disabled={isSaving} onClick={() => void persistSession()} className="underline ml-3">Retry saving</button></div>}
+      {isSaving && <p role="status" className="text-gray-400">Saving your session...</p>}
         <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-10 max-w-2xl w-full shadow-lg text-center">
           <h1 className="text-4xl font-bold mb-2">🎉 Interview Complete!</h1>
           <p className="text-gray-500 mb-8">Great job finishing the session.</p>
-          
+
           <div className="grid grid-cols-2 gap-4 mb-8">
             <div className="bg-gray-50 dark:bg-gray-950 p-6 rounded-xl border border-gray-100 dark:border-gray-800 flex flex-col items-center">
               <span className="text-gray-500 font-medium mb-1">Overall Score</span>
@@ -814,7 +718,7 @@ export function InterviewLiveSession() {
               <span className="text-4xl font-bold">{accumulatedFeedbacks.length}</span>
             </div>
           </div>
-          
+
           {scoredFeedbacks.length > 0 && (
             <div className="bg-gray-50 dark:bg-gray-950 rounded-xl border border-gray-100 dark:border-gray-800 p-4 mb-8 text-sm flex justify-around">
               <div>
@@ -846,7 +750,9 @@ export function InterviewLiveSession() {
 
   return (
     <div className="flex flex-col h-full min-h-[calc(100vh-4rem)] p-4 max-w-[1600px] mx-auto space-y-4 bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-200">
-      
+      {saveError && <div role="alert" className="p-4 border border-red-500 rounded-lg text-red-400">{saveError} <button disabled={isSaving} onClick={() => void persistSession()} className="underline ml-3">Retry saving</button></div>}
+      {isSaving && <p role="status" className="text-gray-400">Saving your session...</p>}
+
       {!speechSupported && (
         <div className="bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800 text-yellow-800 dark:text-yellow-200 p-4 rounded-xl flex items-start gap-3">
           <AlertCircle className="shrink-0 mt-0.5" size={20} />
@@ -861,7 +767,7 @@ export function InterviewLiveSession() {
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 p-8 rounded-2xl max-w-md w-full shadow-2xl text-center">
             <AlertCircle size={48} className="mx-auto text-red-500 mb-4" />
-            <h3 className="text-xl font-bold mb-2">Permissions Error</h3>
+            <h3 className="text-xl font-bold mb-2">Session Error</h3>
             <p className="text-gray-500 dark:text-gray-400 mb-6">{mediaError}</p>
             <button onClick={() => setMediaError(null)} className="px-6 py-2 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-lg font-bold">
               Dismiss
@@ -890,10 +796,11 @@ export function InterviewLiveSession() {
             {isTTSMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
           </button>
           <button
-            onClick={toggleSession}
+            onClick={() => { void toggleSession().catch(() => setMediaError("Session could not be started. Please sign in or try again.")); }}
+                disabled={isSaving}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold transition-all ${
-              isSessionActive 
-              ? "bg-red-500 hover:bg-red-600 text-white shadow-red-500/20" 
+              isSessionActive
+              ? "bg-red-500 hover:bg-red-600 text-white shadow-red-500/20"
               : "bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20"
             }`}
           >
@@ -918,7 +825,7 @@ export function InterviewLiveSession() {
                 <div className="flex justify-between items-start gap-4">
                   <h2 className="text-2xl font-bold flex-1">{currentQuestion}</h2>
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <button 
+                    <button
                       onClick={handlePreviousQuestion}
                       disabled={currentQuestionIndex === 0 && !followUpQuestion}
                       className="p-2 bg-blue-100 dark:bg-blue-800/50 text-blue-600 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-800 disabled:opacity-30 disabled:cursor-not-allowed transition"
@@ -926,16 +833,16 @@ export function InterviewLiveSession() {
                     >
                       <ChevronLeft size={18} />
                     </button>
-                    <button 
+                    <button
                       onClick={handleNextQuestion}
                       className="p-2 bg-blue-100 dark:bg-blue-800/50 text-blue-600 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-800 transition"
                       title="Skip to Next Question"
                     >
                       <ChevronRight size={18} />
                     </button>
-                    <button 
-                      onClick={replayQuestion} 
-                      className="p-2 bg-blue-100 dark:bg-blue-800/50 text-blue-600 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-800 transition" 
+                    <button
+                      onClick={replayQuestion}
+                      className="p-2 bg-blue-100 dark:bg-blue-800/50 text-blue-600 dark:text-blue-300 rounded-lg hover:bg-blue-200 dark:hover:bg-blue-800 transition"
                       title="Replay Question Audio"
                     >
                       <Volume2 size={18} />
@@ -957,10 +864,10 @@ export function InterviewLiveSession() {
                             <Mic size={14} className={audioLevel > 5 ? "text-green-500 animate-pulse" : "text-gray-400"} />
                             <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">Voice:</span>
                             <div className="w-16 sm:w-20 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                              <div 
+                              <div
                                 className={`h-full transition-all duration-75 ${
-                                  audioLevel > 60 
-                                    ? "bg-gradient-to-r from-green-500 to-amber-500" 
+                                  audioLevel > 60
+                                    ? "bg-gradient-to-r from-green-500 to-amber-500"
                                     : "bg-green-500"
                                 }`}
                                 style={{ width: `${isMicOn ? Math.min(100, Math.max(audioLevel, 0)) : 0}%` }}
@@ -972,19 +879,21 @@ export function InterviewLiveSession() {
                           </div>
                         )}
 
-                        <button 
+                        <button
                           type="button"
-                          onClick={() => setIsManualEditing(!isManualEditing)}
+                          onClick={() => { if (!isManualEditing) { stopSpeechRecognition(); stopRecording(); } else if (isSessionActive) { finalizedPrefixRef.current = transcript; startSpeechRecognition(); startRecording(); } setIsManualEditing(!isManualEditing); }}
                           className="text-xs text-blue-500 hover:text-blue-400 font-medium ml-auto px-2 py-1 rounded-lg hover:bg-blue-500/10 transition"
                         >
                           {isManualEditing ? "🎤 Voice Mode" : "✏️ Type / Edit"}
                         </button>
                     </div>
-                    
+
                     <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-950 rounded-xl p-4 border border-gray-100 dark:border-gray-800 min-h-[200px] flex flex-col">
                         {isManualEditing ? (
                           <textarea
                             value={transcript}
+                    disabled={isTranscribing || isStreaming}
+                            maxLength={12000}
                             onChange={(e) => {
                               setTranscript(e.target.value);
                               segmentBufferRef.current = e.target.value;
@@ -1037,9 +946,9 @@ export function InterviewLiveSession() {
                     {/* Bottom Action Controls */}
                     <div className="mt-4 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                       {/* Big Prominent Analyze Button */}
-                      <button 
+                      <button
                         onClick={handleManualAnalyze}
-                        disabled={appState === "ANALYZING" || isTranscribing || !isSessionActive}
+                        disabled={isStreaming || appState === "ANALYZING" || isTranscribing || !isSessionActive}
                         className={`flex-[3] py-3.5 px-6 rounded-xl font-bold flex items-center justify-center gap-2 text-base transition-all shadow-md ${
                           appState === "ANALYZING" || isTranscribing
                             ? "bg-purple-600 text-white animate-pulse cursor-wait"
@@ -1050,17 +959,17 @@ export function InterviewLiveSession() {
                       >
                         <CheckCircle size={20} />
                         <span>
-                          {isTranscribing 
-                            ? "Transcribing Voice with AI..." 
-                            : appState === "ANALYZING" 
-                              ? "Evaluating Answer..." 
+                          {isTranscribing
+                            ? "Transcribing Voice with AI..."
+                            : appState === "ANALYZING"
+                              ? "Evaluating Answer..."
                               : "Done Speaking — Analyze My Answer"}
                         </span>
                       </button>
 
                       <div className="flex items-center gap-2 flex-1">
                         {/* Clear / Retry Button */}
-                        <button 
+                        <button
                           onClick={handleRetryQuestion}
                           disabled={!transcript && !interimTranscript && appState !== "FEEDBACK"}
                           className="py-3.5 px-3 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded-xl font-semibold text-sm flex items-center justify-center gap-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 transition border border-gray-200 dark:border-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1069,19 +978,19 @@ export function InterviewLiveSession() {
                           <RotateCcw size={16} /> Retry
                         </button>
 
-                        <button 
-                          onClick={toggleMic} 
+                        <button
+                          onClick={toggleMic}
                           className={`flex-1 py-3.5 px-3 rounded-xl flex items-center justify-center gap-1.5 font-semibold text-sm transition ${
-                            isMicOn 
-                              ? "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700" 
+                            isMicOn
+                              ? "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700"
                               : "bg-red-500/10 text-red-500 border border-red-500/20"
                           }`}
                         >
                           {isMicOn ? <><Mic size={16} /> Mic</> : <><MicOff size={16} /> Muted</>}
                         </button>
 
-                        <button 
-                          onClick={handleSkipQuestion} 
+                        <button
+                          onClick={handleSkipQuestion}
                           className="py-3.5 px-3 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 rounded-xl font-semibold text-sm flex items-center justify-center gap-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 transition border border-gray-200 dark:border-gray-700"
                           title="Skip this question"
                         >
@@ -1102,7 +1011,7 @@ export function InterviewLiveSession() {
 
              {appState === "FEEDBACK" && (markdownFeedback || isStreaming) ? (
                <div className="flex-1 overflow-y-auto space-y-6">
-                 
+
                  <div className="prose prose-sm dark:prose-invert prose-blue max-w-none text-gray-800 dark:text-gray-200">
                     <ReactMarkdown>{markdownFeedback}</ReactMarkdown>
                     {isStreaming && (
@@ -1118,7 +1027,7 @@ export function InterviewLiveSession() {
                        </div>
                     </div>
                  )}
-                 
+
                  <div className="mt-4 flex flex-col gap-2">
                    {!isStreaming && (
                      <>

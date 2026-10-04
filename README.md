@@ -1,231 +1,62 @@
-# 🎙️ AI Communication Coach — Mock Interview & Speech Training Platform
+# AI Communication Coach
 
-> An intelligent, speech-first AI coaching platform that elevates your communication and interview skills through real-time speech transcription, STAR method evaluation, and personalized performance insights.
+A Next.js application for communication practice and mock interviews. It streams Gemini coaching feedback, transcribes short recordings, generates five interview questions from a job description and optional resume, and stores personal practice history in Supabase.
 
-[![Next.js](https://img.shields.io/badge/Next.js-15.3-black?style=flat&logo=next.js)](https://nextjs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue?style=flat&logo=typescript)](https://www.typescriptlang.org/)
-[![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3.4-38B2AC?style=flat&logo=tailwind-css)](https://tailwindcss.com/)
-[![Google Gemini API](https://img.shields.io/badge/Google_Gemini_AI-2.5-4285F4?style=flat&logo=google)](https://ai.google.dev/)
-[![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?style=flat&logo=supabase)](https://supabase.com/)
+## Release status
 
----
+This branch introduces authenticated guests, account flows, ownership policies and database quotas. **Do not deploy it against the current database yet.** The production schema, policies and data have not been inspected. The SQL migration is a local draft, and intentionally refuses to run without a backup-review acknowledgement. No live database changes are part of this work.
 
-## 🌟 Overview
+## Stack and structure
 
-**AI Communication Coach** is engineered to bridge the gap between preparing for conversations and executing them under pressure. Designed specifically for speech practice, it removes distracting video streams and focuses entirely on **verbal delivery, content structure, and pacing**.
+Next.js App Router, React, TypeScript, Tailwind CSS, Supabase Auth/PostgreSQL, Google Gemini, Zod, Recharts, Mammoth (DOCX) and pdf-parse.
 
-Whether preparing for technical engineering interviews, executive presentations, or behavioral screening, the platform provides instantaneous, rubric-based feedback with audio playback so you can hear exactly how you sound to an interviewer.
+- `src/app`: pages, account routes, server actions and two coaching endpoints.
+- `src/components`: practice interfaces, navigation and safe Markdown rendering.
+- `src/lib`: auth clients, validation, AI processing, quotas, recording and history.
+- `supabase/migrations`: draft database migration.
+- `tests`: validation, recording/stream and isolated PostgreSQL tests.
+- `docs`: architecture, auth, security, database, API and deployment guides.
 
----
+## Requirements and installation
 
-## ✨ Key Features
+Use Node.js 22 or newer and npm. Install from the lockfile:
 
-### 🎯 1. JD & Resume-Aware Mock Interviews
-- **Custom Question Generation**: Upload your resume (PDF or text) and paste a target Job Description. Google Gemini generates role-tailored interview questions.
-- **Focus Modes**: Toggle between **Technical**, **Behavioral**, or **Mixed** question sets.
-- **Difficulty & Context Matching**: Evaluates answers specifically against the criteria demanded by the target company and role.
-
-### 🗣️ 2. Speech-First Live Practice Session
-- **Real-Time Speech-to-Text**: Transcribes candidate answers live using the browser Web Speech API.
-- **Audio Recording & Playback**: Automatically captures audio chunks via `MediaRecorder` and provides instant playback controls to listen to your voice and tone.
-- **Voice Text-to-Speech (TTS)**: Questions are read aloud by an AI interviewer with instant replay and mute toggles.
-- **Candidate-Controlled Flow**:
-  - **Done Speaking — Analyze My Answer**: Explicit control over when evaluation starts.
-  - **Retry Question**: Reset answer and immediately try again with fresh recording.
-  - **Previous & Skip Controls**: Full control to navigate backward or forward across interview questions.
-  - **Pause & Resume**: Pause listening and recording at any time without losing context.
-
-### 🧠 3. STAR Framework & Granular Coaching
-- **Objective Multi-Dimensional Scoring**: Evaluates clarity, relevance, confidence, and structure (0–100 score).
-- **Actionable Critique**: Pinpoints the exact weakness in your response.
-- **What Was Missing**: Highlights omitted metrics, context, or results (following the Situation, Task, Action, Result methodology).
-- **Better Approach Example**: Provides a model answer demonstrating how to rephrase and elevate your points.
-- **Adaptive Follow-Up Questions**: Generates follow-up challenges if an initial answer was incomplete.
-
-### 📊 4. Insights & Long-Term Analytics
-- **Historical Performance Tracking**: Aggregate overall scores, practice sessions, speaking time, and streaks.
-- **Dimension Breakdown**: Track progress across Confidence, Conciseness, Clarity, Empathy, Pacing, and Structure.
-- **Session History & Transcript Review**: Expand past sessions to inspect full spoken transcripts and AI recommendations.
-- **One-Click Transcript Export**: Copy past transcripts directly to your clipboard.
-
-### 🔒 5. Zero-Friction Guest Identity
-- Instant access with auto-generated secure guest cookies (`guest_id`).
-- No initial signup wall required to start practicing immediately.
-
----
-
-## 🛠️ Tech Stack & Architecture
-
-| Layer | Technologies |
-|---|---|
-| **Framework** | [Next.js 15 (App Router)](https://nextjs.org/) |
-| **Language** | [TypeScript](https://www.typescriptlang.org/) |
-| **Styling & UI** | [Tailwind CSS](https://tailwindcss.com/), [Lucide React](https://lucide.dev/) |
-| **Artificial Intelligence** | [Google Gemini 2.5 API](https://ai.google.dev/) (`@google/genai`) |
-| **Database & Auth** | [Supabase](https://supabase.com/) (PostgreSQL + Guest Identity) |
-| **Audio & Speech APIs** | Web Speech API (`webkitSpeechRecognition`, `SpeechSynthesis`), `MediaRecorder` |
-| **File Parsing** | `pdf-parse` for automated resume text extraction |
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-- **Node.js**: Version 18.18 or higher (Node 20+ recommended)
-- **Package Manager**: `npm`, `pnpm`, or `yarn`
-- **Browser**: **Google Chrome** or **Microsoft Edge** (recommended for full Web Speech API compatibility)
-- **API Keys**:
-  - [Google Gemini API Key](https://aistudio.google.com/)
-  - [Supabase Project URL & Anon Key](https://supabase.com/)
-
----
-
-### Installation
-
-1. **Clone the Repository:**
-   ```bash
-   git clone https://github.com/AlwalaShivakumar/AI-Communication-Couch.git
-   cd AI-Communication-Couch
-   ```
-
-2. **Install Dependencies:**
-   ```bash
-   npm install
-   ```
-
-3. **Configure Environment Variables:**
-   Copy the provided `.env.example` file to `.env.local`:
-   ```bash
-   cp .env.example .env.local
-   ```
-   Open `.env.local` and insert your actual credentials:
-   ```env
-   GEMINI_API_KEY=your_gemini_api_key_here
-   NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
-   ```
-
----
-
-### Database Setup (Supabase)
-
-Execute the following SQL schema in your Supabase SQL Editor:
-
-```sql
--- Enable UUID extension
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
--- Profiles table
-CREATE TABLE IF NOT EXISTS profiles (
-  id UUID PRIMARY KEY,
-  name TEXT,
-  target_role TEXT,
-  bio TEXT,
-  last_insights_cache JSONB,
-  last_insights_timestamp TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Sessions table
-CREATE TABLE IF NOT EXISTS sessions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID NOT NULL,
-  mode TEXT NOT NULL,
-  duration_ms BIGINT DEFAULT 0,
-  speaking_time_ms BIGINT DEFAULT 0,
-  overall_score INT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Session feedbacks table
-CREATE TABLE IF NOT EXISTS session_feedbacks (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
-  transcript TEXT,
-  score INT,
-  biggest_weakness TEXT,
-  fix TEXT,
-  is_retry BOOLEAN DEFAULT FALSE,
-  retry_improvement INT,
-  raw_feedback JSONB,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Session dimensions table
-CREATE TABLE IF NOT EXISTS session_dimensions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
-  dimension TEXT NOT NULL,
-  score INT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
-
----
-
-### Running the Application
-
-Start the local development server:
-
-```bash
+```sh
+npm ci
+cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in **Google Chrome** or **Microsoft Edge**.
+On Windows, copy the example with your file manager or PowerShell. Fill in the environment values for a **development** Supabase project and Gemini key. Never commit credentials.
 
----
+| Variable | Purpose | Browser exposure |
+| --- | --- | --- |
+| NEXT_PUBLIC_SUPABASE_URL | Supabase project URL | Public |
+| NEXT_PUBLIC_SUPABASE_ANON_KEY | Publishable key or legacy anon JWT | Public |
+| GEMINI_API_KEY | Server-side Gemini requests | Private |
 
-## 📁 Project Structure
+The existing variable name ANON_KEY is retained for deployment compatibility. A publishable key is supported. A service-role key is neither required nor used; remove the old unused server secret from future deployment configuration after reviewing any external consumers.
 
-```
-├── public/                      # Static assets & icons
-├── src/
-│   ├── app/
-│   │   ├── actions.ts           # Gemini API Server Actions (evaluations & dimensions)
-│   │   ├── layout.tsx           # Global app layout with active navigation
-│   │   ├── page.tsx             # Landing page & mode selection
-│   │   ├── insights/
-│   │   │   ├── page.tsx         # Performance dashboard (SSR data loader)
-│   │   │   └── ProfileDashboardClient.tsx # Charts, history & streak analytics
-│   │   ├── interview/
-│   │   │   ├── actions.ts       # Interview question generator (JD & PDF resume)
-│   │   │   ├── page.tsx         # Interview setup & difficulty selection
-│   │   │   └── live/
-│   │   │       └── page.tsx     # Mock interview session container
-│   │   └── profile/
-│   │       └── page.tsx         # User profile configuration
-│   ├── components/
-│   │   ├── InterviewLiveSession.tsx # Core interview simulator & audio recording engine
-│   │   ├── LiveSession.tsx      # General communication coach
-│   │   └── Navbar.tsx           # Navigation bar with responsive styling
-│   └── lib/
-│       ├── auth.ts              # Guest ID management (cookies)
-│       └── supabase.ts          # Supabase client & type declarations
-├── .env.example                 # Public environment template (safe to commit)
-├── .gitignore                   # Comprehensive rule list protecting secrets
-└── README.md                    # Project documentation
+## Database and authentication setup
+
+Start with a separate development project. Follow [database.md](docs/database.md) before reviewing the draft migration. Enable anonymous sign-in, email/password auth, email confirmation and manual identity linking. Configure redirects and email delivery as described in [authentication.md](docs/authentication.md). These project settings are not changed by source code.
+
+The guest experience creates a real Supabase anonymous user. Creating an account verifies an email and then sets a password while retaining that user's ID. Signing into an existing account does not merge guest history. Legacy editable guest IDs are never accepted as proof of ownership.
+
+## Verification
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run test:production
 ```
 
----
+Tests run an isolated PostgreSQL engine in memory; they do not connect to Supabase. test:production rebuilds with isolated loopback service settings and checks unauthenticated HTTP boundaries. The resulting local build uses test configuration; rebuild with the intended environment before serving it to users. Provider responses, email delivery, real Supabase Auth and browser microphone behavior still require development/preview testing.
 
-## 🛡️ Security & Best Practices
+## Deployment and security
 
-1. **Environment Variables**: API keys are accessed exclusively on the server side via Next.js Server Actions (`src/app/actions.ts`, `src/app/interview/actions.ts`), protecting your Gemini secret key from client-side exposure.
-2. **Audio Data Privacy**: Audio recordings are handled in-memory using Object URLs (`URL.createObjectURL(blob)`) and are not sent to external servers unless explicitly configured.
-3. **Repository Sanitation**: Any local test files, logs, and temporary build outputs are excluded via `.gitignore`.
+Vercel uses the normal Next.js build; there is no vercel.json. Coaching routes run on Node.js with a 120-second maximum duration. Server actions have a 3 MB transport limit; uploads and recordings are separately limited to 2 MB. AI calls require authenticated sessions and database quota reservations.
 
----
-
-## 📝 Available Scripts
-
-- `npm run dev`: Start the development server at `localhost:3000`.
-- `npm run build`: Create an optimized production build.
-- `npm run start`: Run the compiled production application.
-- `npm run lint`: Run ESLint to identify code issues.
-
----
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
+Read [deployment.md](docs/deployment.md) for the release sequence and checklist, and [security.md](docs/security.md) for controls and limitations. Feedback scores are subjective practice estimates, not certified assessments. Recordings, resumes and responses used for AI processing are sent to Google; audio and resume files are not stored by this application.
